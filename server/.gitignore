@@ -1,0 +1,5 @@
+# local SQLite database + runtime exports
+server/data/
+*.db
+*.db-shm
+*.db-wal

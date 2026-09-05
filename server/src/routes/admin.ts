@@ -1,0 +1,302 @@
+import { Router } from 'express';
+import { existsSync, statSync } from 'node:fs';
+import { resolve } from 'node:path';
+import os from 'node:os';
+import {
+  asyncHandler,
+  requireAdmin,
+  sendError,
+  type AppRequest,
+  type AppResponse,
+} from '../middleware';
+import { config } from '../config';
+import { db, logEvent, nowIso, sql } from '../db';
+import { createUser, getUserById, hashPassword, toAppUser } from '../auth';
+
+export const adminRouter = Router();
+adminRouter.use(requireAdmin);
+
+function countAdmins(): number {
+  const row = db.prepare("SELECT COUNT(*) AS c FROM users WHERE role = 'admin' AND enabled = 1").get() as { c: number };
+  return Number(row.c);
+}
+
+// GET /api/admin/users
+adminRouter.get(
+  '/users',
+  asyncHandler(async (_req: AppRequest, res: AppResponse) => {
+    const rows = db.prepare('SELECT id, username, email, password_changed_at, role, enabled, created_at, updated_at FROM users ORDER BY created_at ASC').all() as Record<string, unknown>[];
+    res.json({ users: rows.map(toAppUser) });
+  })
+);
+
+// POST /api/admin/users — create user (email acts as the login identifier)
+adminRouter.post(
+  '/users',
+  asyncHandler(async (req: AppRequest, res: AppResponse) => {
+    const { username, email, password, role } = (req.body || {}) as {
+      username?: unknown;
+      email?: unknown;
+      password?: unknown;
+      role?: unknown;
+    };
+    const rawEmail = typeof email === 'string' ? email.trim().toLowerCase() : '';
+    const rawUsername = typeof username === 'string' ? username.trim() : '';
+    const finalUsername = rawEmail || rawUsername;
+
+    if (!finalUsername) {
+      return sendError(res, 400, 'Email is required');
+    }
+    if (typeof password !== 'string' || password.length < 8) {
+      return sendError(res, 400, 'Password must be at least 8 characters');
+    }
+    const finalRole = role === 'admin' ? 'admin' : 'user';
+
+    const exists = db
+      .prepare('SELECT id FROM users WHERE username = ? COLLATE NOCASE OR (email = ? COLLATE NOCASE AND email IS NOT NULL)')
+      .get(finalUsername, finalUsername);
+    if (exists) {
+      return sendError(res, 409, 'Email already exists');
+    }
+
+    const hashed = await hashPassword(password);
+    const user = createUser(finalUsername, hashed, finalRole, rawEmail || null);
+    logEvent('ADMIN', 'info', `Admin "${req.user?.username}" created user "${user.username}" (${finalRole})`);
+    res.status(201).json({ user: toAppUser(user) });
+  })
+);
+
+// PUT /api/admin/users/:id — update username/role/enabled (never the password)
+adminRouter.put(
+  '/users/:id',
+  asyncHandler(async (req: AppRequest, res: AppResponse) => {
+    const id = String(req.params.id || '');
+    const user = getUserById(id);
+    if (!user) return sendError(res, 404, 'User not found');
+
+    const body = (req.body || {}) as { username?: unknown; role?: unknown; enabled?: unknown };
+    const updates: Record<string, unknown> = {};
+    const now = nowIso();
+
+    if (body.username !== undefined) {
+      if (typeof body.username !== 'string' || !body.username.trim()) {
+        return sendError(res, 400, 'username must be a non-empty string');
+      }
+      const clash = db.prepare('SELECT id FROM users WHERE username = ? COLLATE NOCASE').get(body.username.trim());
+      if (clash && String((clash as { id: string }).id) !== id) {
+        return sendError(res, 409, 'Username already exists');
+      }
+      updates.username = body.username.trim();
+    }
+
+    if (body.role !== undefined) {
+      const nextRole = body.role === 'admin' ? 'admin' : 'user';
+      const wasAdmin = user.role === 'admin';
+      if (wasAdmin && nextRole !== 'admin' && countAdmins() <= 1) {
+        return sendError(res, 409, 'Cannot demote the last remaining admin');
+      }
+      updates.role = nextRole;
+    }
+
+    if (body.enabled !== undefined) {
+      const enabled = Boolean(body.enabled);
+      if (user.id === req.user!.id && !enabled) {
+        return sendError(res, 409, 'You cannot disable your own account');
+      }
+      if (user.role === 'admin' && !enabled && countAdmins() <= 1) {
+        return sendError(res, 409, 'Cannot disable the last remaining admin');
+      }
+      updates.enabled = enabled ? 1 : 0;
+    }
+
+    const keys = Object.keys(updates);
+    if (keys.length === 0) {
+      return sendError(res, 400, 'Nothing to update');
+    }
+    keys.push('updated_at');
+    db.prepare(`UPDATE users SET ${keys.map((k) => `${k} = ?`).join(', ')} WHERE id = ?`).run(
+      ...sql([...Object.values(updates), now]),
+      id
+    );
+    logEvent('ADMIN', 'info', `Admin "${req.user?.username}" updated user "${user.username}"`);
+    res.json({ user: toAppUser(getUserById(id)!) });
+  })
+);
+
+// POST /api/admin/users/:id/reset-password
+adminRouter.post(
+  '/users/:id/reset-password',
+  asyncHandler(async (req: AppRequest, res: AppResponse) => {
+    const id = String(req.params.id || '');
+    const user = getUserById(id);
+    if (!user) return sendError(res, 404, 'User not found');
+
+    const { password } = (req.body || {}) as { password?: unknown };
+    if (typeof password !== 'string' || password.length < 8) {
+      return sendError(res, 400, 'Password must be at least 8 characters');
+    }
+
+    const hashed = await hashPassword(password);
+    const changedAt = nowIso();
+    db.prepare('UPDATE users SET password_hash = ?, password_changed_at = ?, updated_at = ? WHERE id = ?').run(
+      hashed,
+      changedAt,
+      changedAt,
+      id
+    );
+    // Revoke all sessions so the reset takes effect everywhere.
+    db.prepare('DELETE FROM sessions WHERE user_id = ?').run(id);
+    logEvent('ADMIN', 'warn', `Admin "${req.user?.username}" reset password for "${user.username}"`);
+    res.json({ success: true });
+  })
+);
+
+// DELETE /api/admin/users/:id
+adminRouter.delete(
+  '/users/:id',
+  asyncHandler(async (req: AppRequest, res: AppResponse) => {
+    const id = String(req.params.id || '');
+    const user = getUserById(id);
+    if (!user) return sendError(res, 404, 'User not found');
+
+    if (user.id === req.user!.id) {
+      return sendError(res, 409, 'You cannot delete your own account');
+    }
+    if (user.role === 'admin' && countAdmins() <= 1) {
+      return sendError(res, 409, 'Cannot delete the last remaining admin');
+    }
+
+    db.prepare('DELETE FROM sessions WHERE user_id = ?').run(id);
+    db.prepare('DELETE FROM users WHERE id = ?').run(id);
+    logEvent('ADMIN', 'info', `Admin "${req.user?.username}" deleted user "${user.username}"`);
+    res.json({ success: true, id });
+  })
+);
+
+// GET /api/admin/overview — per-user extraction stats + system/imported bucket
+adminRouter.get(
+  '/overview',
+  asyncHandler(async (_req: AppRequest, res: AppResponse) => {
+    const users = db
+      .prepare(
+        `SELECT
+           u.id, u.username, u.email, u.password_changed_at, u.role, u.enabled, u.created_at, u.updated_at,
+           (SELECT COUNT(*) FROM searches s WHERE s.created_by = u.id) AS total_searches,
+           (SELECT COUNT(*) FROM search_leads sl JOIN searches s ON s.id = sl.search_id AND s.created_by = u.id) AS leads_extracted,
+           (SELECT MAX(s.created_at) FROM searches s WHERE s.created_by = u.id) AS last_search_at
+         FROM users u ORDER BY u.created_at ASC`
+      )
+      .all() as Record<string, unknown>[];
+
+    const system = db
+      .prepare(
+        `SELECT COUNT(DISTINCT s.id) AS total_searches, COUNT(sl.id) AS leads_extracted, MAX(s.created_at) AS last_search_at
+         FROM searches s LEFT JOIN search_leads sl ON sl.search_id = s.id
+         WHERE s.created_by IS NULL`
+      )
+      .get() as { total_searches: number; leads_extracted: number; last_search_at: string | null };
+
+    res.json({
+      users: users.map((u) => ({
+        id: String(u.id),
+        username: String(u.username),
+        email: (u.email as string) ?? '',
+        role: String(u.role),
+        enabled: Boolean(u.enabled),
+        password_changed_at: (u.password_changed_at as string) ?? null,
+        created_at: String(u.created_at),
+        updated_at: String(u.updated_at),
+        total_searches: Number(u.total_searches),
+        leads_extracted: Number(u.leads_extracted),
+        last_search_at: (u.last_search_at as string) ?? null,
+      })),
+      system: {
+        label: 'Imported',
+        total_searches: Number(system.total_searches),
+        leads_extracted: Number(system.leads_extracted),
+        last_search_at: (system.last_search_at as string) ?? null,
+      },
+      totals: {
+        searches: Number((db.prepare('SELECT COUNT(*) AS c FROM searches').get() as { c: number }).c),
+        leads: Number((db.prepare('SELECT COUNT(*) AS c FROM leads').get() as { c: number }).c),
+      },
+    });
+  })
+);
+
+// GET /api/admin/events?level=&tail= — app events (errors, logs)
+adminRouter.get(
+  '/events',
+  asyncHandler(async (req: AppRequest, res: AppResponse) => {
+    const level = typeof req.query.level === 'string' ? req.query.level : undefined;
+    const tail = Math.max(1, Math.min(500, parseInt(String(req.query.tail || '100'), 10) || 100));
+
+    let rows: Record<string, unknown>[];
+    if (level) {
+      rows = db
+        .prepare('SELECT * FROM app_events WHERE level = ? ORDER BY created_at DESC LIMIT ?')
+        .all(level, tail) as Record<string, unknown>[];
+    } else {
+      rows = db
+        .prepare('SELECT * FROM app_events ORDER BY created_at DESC LIMIT ?')
+        .all(tail) as Record<string, unknown>[];
+    }
+
+    res.json({ events: rows });
+  })
+);
+
+// DELETE /api/admin/events — purge events older than retention (or all)
+adminRouter.delete(
+  '/events',
+  asyncHandler(async (req: AppRequest, res: AppResponse) => {
+    const { scope } = (req.query || {}) as { scope?: string };
+    if (scope === 'all') {
+      db.prepare('DELETE FROM app_events').run();
+    } else {
+      const cutoff = new Date(Date.now() - config.logRetentionDays * 24 * 60 * 60 * 1000).toISOString();
+      db.prepare('DELETE FROM app_events WHERE created_at < ?').run(cutoff);
+    }
+    res.json({ success: true });
+  })
+);
+
+// GET /api/admin/health
+adminRouter.get(
+  '/health',
+  asyncHandler(async (req: AppRequest, res: AppResponse) => {
+    const searchRow = db.prepare("SELECT COUNT(*) AS c FROM searches WHERE status IN ('pending','discovering','enriching')").get() as { c: number };
+    const dbFile = config.dbPath;
+    const dbSizeBytes = existsSync(dbFile) ? statSync(dbFile).size : 0;
+
+    const envBrowsersPath = process.env.PLAYWRIGHT_BROWSERS_PATH || '';
+    const browsersPath = envBrowsersPath ? resolve(envBrowsersPath) : '';
+
+    res.json({
+      status: 'ok',
+      uptime_seconds: Math.round(process.uptime()),
+      node: process.version,
+      platform: process.platform,
+      arch: process.arch,
+      os: { platform: os.platform(), release: os.release() },
+      memory_free_mb: Math.round(os.freemem() / 1024 / 1024),
+      memory_total_mb: Math.round(os.totalmem() / 1024 / 1024),
+      db: {
+        path: dbFile,
+        size_bytes: dbSizeBytes,
+        searches: Number((db.prepare('SELECT COUNT(*) AS c FROM searches').get() as { c: number }).c),
+        leads: Number((db.prepare('SELECT COUNT(*) AS c FROM leads').get() as { c: number }).c),
+        users: Number((db.prepare('SELECT COUNT(*) AS c FROM users').get() as { c: number }).c),
+      },
+      running_searches: Number(searchRow.c),
+      chromium: {
+        configured: !!envBrowsersPath,
+        browsers_path: browsersPath,
+        exists: !!browsersPath && existsSync(browsersPath),
+      },
+      tunnel: {
+        https_terminated: Boolean(req.headers['x-forwarded-proto']),
+      },
+    });
+  })
+);
