@@ -15,7 +15,8 @@
     "create-admin": "tsx scripts/create-admin.ts",
     "start:local": "scripts\\start-all.cmd",
     "stop:local": "scripts\\stop-all.cmd",
-    "backup": "tsx scripts/backup-db.ts"
+    "backup": "tsx scripts/backup-db.ts",
+    "rotate-logs": "tsx scripts/rotate-logs.ts"
   },
   "dependencies": {
     "@radix-ui/react-dialog": "^1.1.23",
@@ -53,7 +54,8 @@
     "eslint-config-next": "16.3.4",
     "tailwindcss": "^4",
     "tsx": "^4.23.13",
-    "typescript": "^5"
+    "typescript": "^5",
+    "vercel": "^59.11.7"
   },
   "allowScripts": {
     "esbuild@0.28.2": true

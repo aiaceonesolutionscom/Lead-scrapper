@@ -1,6 +1,6 @@
 import { Router } from 'express';
-import { existsSync, statSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { existsSync, statSync, statfsSync, readdirSync } from 'node:fs';
+import { resolve, join } from 'node:path';
 import os from 'node:os';
 import {
   asyncHandler,
@@ -15,6 +15,22 @@ import { createUser, getUserById, hashPassword, toAppUser } from '../auth';
 
 export const adminRouter = Router();
 adminRouter.use(requireAdmin);
+
+/** Recursive directory size in bytes; missing dirs and unreadable entries are silently skipped. */
+function dirSizeBytes(dir: string): number {
+  if (!existsSync(dir)) return 0;
+  let total = 0;
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const full = join(dir, entry.name);
+    try {
+      if (entry.isDirectory()) total += dirSizeBytes(full);
+      else total += statSync(full).size;
+    } catch {
+      // skip files that vanish mid-walk or can't be read
+    }
+  }
+  return total;
+}
 
 function countAdmins(): number {
   const row = db.prepare("SELECT COUNT(*) AS c FROM users WHERE role = 'admin' AND enabled = 1").get() as { c: number };
@@ -272,6 +288,21 @@ adminRouter.get(
     const envBrowsersPath = process.env.PLAYWRIGHT_BROWSERS_PATH || '';
     const browsersPath = envBrowsersPath ? resolve(envBrowsersPath) : '';
 
+    const logsDir = resolve(config.repoRoot, 'logs');
+    const npmCacheDir = resolve(config.repoRoot, '.runtime', 'npm-cache');
+    const backupsDir = resolve(config.repoRoot, 'backups');
+
+    let diskFree: { free_gb: number; total_gb: number } | null = null;
+    try {
+      const s = statfsSync(config.repoRoot);
+      diskFree = {
+        free_gb: Math.round((s.bavail * s.bsize) / 1024 / 1024 / 1024 * 10) / 10,
+        total_gb: Math.round((s.blocks * s.bsize) / 1024 / 1024 / 1024 * 10) / 10,
+      };
+    } catch {
+      // statfs unsupported on this platform — leave null
+    }
+
     res.json({
       status: 'ok',
       uptime_seconds: Math.round(process.uptime()),
@@ -296,6 +327,13 @@ adminRouter.get(
       },
       tunnel: {
         https_terminated: Boolean(req.headers['x-forwarded-proto']),
+      },
+      disk: {
+        drive_free_gb: diskFree?.free_gb ?? null,
+        drive_total_gb: diskFree?.total_gb ?? null,
+        logs_mb: Math.round(dirSizeBytes(logsDir) / 1024 / 1024 * 10) / 10,
+        npm_cache_mb: Math.round(dirSizeBytes(npmCacheDir) / 1024 / 1024 * 10) / 10,
+        backups_mb: Math.round(dirSizeBytes(backupsDir) / 1024 / 1024 * 10) / 10,
       },
     });
   })

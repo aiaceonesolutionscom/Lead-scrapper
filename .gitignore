@@ -37,6 +37,7 @@ yarn-error.log*
 # local backend runtime data + DB
 server/data/
 .runtime/
+backups/
 
 # local dev logs
 dev-server.log
