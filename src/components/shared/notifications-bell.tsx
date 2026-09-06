@@ -26,6 +26,45 @@ function timeAgo(iso: string): string {
   return `${days}d ago`;
 }
 
+// Browsers block audio before the user interacts with the page. We lazily
+// create an AudioContext and unlock it on the first click/keypress, so a
+// fresh login still gets the "ding" on new notifications.
+let audioCtx: AudioContext | null = null;
+
+function ensureAudio(): AudioContext | null {
+  try {
+    if (!audioCtx) {
+      const Ctor = window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+      if (!Ctor) return null;
+      audioCtx = new Ctor();
+    }
+    if (audioCtx.state === "suspended") void audioCtx.resume();
+    return audioCtx;
+  } catch {
+    return null;
+  }
+}
+
+function playDing(): void {
+  const ctx = ensureAudio();
+  if (!ctx) return;
+  const now = ctx.currentTime;
+  [880, 1174.66].forEach((freq, i) => {
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = "sine";
+    osc.frequency.value = freq;
+    const t = now + i * 0.16;
+    gain.gain.setValueAtTime(0.0001, t);
+    gain.gain.exponentialRampToValueAtTime(0.12, t + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.16);
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start(t);
+    osc.stop(t + 0.18);
+  });
+}
+
 /** Sidebar bell: polls the API, shows an unread badge and a notifications panel. */
 export function NotificationsBell() {
   const router = useRouter();
@@ -34,13 +73,34 @@ export function NotificationsBell() {
   const [busy, setBusy] = useState(false);
   const panelRef = useRef<HTMLDivElement>(null);
   const pollingRef = useRef<number | null>(null);
+  const seenIdsRef = useRef<Set<string> | null>(null);
 
   const refresh = useCallback(async () => {
     try {
-      setData(await getNotifications());
+      const next = await getNotifications();
+      setData(next);
+      const ids = new Set(next.notifications.map((n) => n.id));
+      const prev = seenIdsRef.current;
+      if (prev !== null) {
+        const hasNew = next.notifications.some((n) => !prev.has(n.id));
+        if (hasNew && !document.hidden) playDing();
+      }
+      seenIdsRef.current = ids;
     } catch {
       // swallow — will retry on next poll
     }
+  }, []);
+
+  // Unlock the audio on the first user gesture so notification rings are not
+  // cut/blocked by the browser's autoplay policy.
+  useEffect(() => {
+    const unlock = () => void ensureAudio();
+    document.addEventListener("pointerdown", unlock);
+    document.addEventListener("keydown", unlock);
+    return () => {
+      document.removeEventListener("pointerdown", unlock);
+      document.removeEventListener("keydown", unlock);
+    };
   }, []);
 
   // Initial fetch + polling refresh every 30s. (Deferred so the synchronous
@@ -107,7 +167,7 @@ export function NotificationsBell() {
       </button>
 
       {open && (
-        <div className="absolute right-0 top-9 z-50 w-80 overflow-hidden rounded-lg border bg-popover text-popover-foreground shadow-lg">
+        <div className="absolute right-0 top-9 z-50 w-80 max-w-[calc(100vw-1rem)] max-md:right-auto max-md:left-0 overflow-hidden rounded-lg border bg-popover text-popover-foreground shadow-lg">
           <div className="flex items-center justify-between border-b px-3 py-2">
             <p className="text-sm font-semibold">Notifications</p>
             <button

@@ -326,12 +326,12 @@ export default function AdminPage() {
             <div className="border rounded-lg divide-y">
               {users.map((u) => (
                 <div key={u.id}>
-                  <div className="flex items-center justify-between gap-3 p-3">
+                  <div className="flex flex-wrap items-center justify-between gap-3 p-3">
                     <button
                       className="min-w-0 text-left"
                       onClick={() => setExpandedUser(expandedUser === u.id ? null : u.id)}
                     >
-                      <div className="flex items-center gap-2">
+                      <div className="flex flex-wrap items-center gap-2">
                         <span className="font-medium text-sm">{u.username}</span>
                         <Badge variant={u.role === "admin" ? "default" : "secondary"} className="text-[10px] px-1.5">{u.role}</Badge>
                         {u.enabled && <Badge variant="outline" className="text-[10px] px-1.5 text-green-600 dark:text-green-400">active</Badge>}
@@ -346,7 +346,7 @@ export default function AdminPage() {
                         )}
                       </p>
                     </button>
-                    <div className="flex items-center gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
                       <Button
                         variant="outline"
                         size="sm"
@@ -388,7 +388,7 @@ export default function AdminPage() {
                           .map((s) => (
                             <div key={s.id} className="flex items-center justify-between gap-3 py-1.5 border-b last:border-b-0">
                               <div className="min-w-0">
-                                <div className="flex items-center gap-2">
+                                <div className="flex flex-wrap items-center gap-2">
                                   <span className="text-sm truncate">&ldquo;{s.keyword}&rdquo;</span>
                                   <span className="text-xs text-muted-foreground shrink-0">{s.search_mode === "city" ? s.city : s.country}</span>
                                 </div>
@@ -493,7 +493,7 @@ export default function AdminPage() {
                         onClick={() => setExpandedUser(expandedUser === u.id ? null : u.id)}
                       >
                         <div className="min-w-0">
-                          <div className="flex items-center gap-2">
+                          <div className="flex flex-wrap items-center gap-2">
                             <span className="font-medium text-sm">{u.username}</span>
                             {u.role === "admin" || u.role === "user" ? (
                               <Badge variant={u.role === "admin" ? "default" : "secondary"} className="text-[10px] px-1.5">{u.role}</Badge>
@@ -519,7 +519,7 @@ export default function AdminPage() {
                               .map((s) => (
                                 <div key={s.id} className="flex items-center justify-between gap-3 py-1.5 border-b last:border-b-0">
                                   <div className="min-w-0">
-                                    <div className="flex items-center gap-2">
+                                    <div className="flex flex-wrap items-center gap-2">
                                       <span className="text-sm truncate">&ldquo;{s.keyword}&rdquo;</span>
                                       <span className="text-xs text-muted-foreground shrink-0">{s.search_mode === "city" ? s.city : s.country}</span>
                                     </div>

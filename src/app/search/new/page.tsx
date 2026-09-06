@@ -224,7 +224,7 @@ export default function NewSearchPage() {
                 <MapPin className="h-3.5 w-3.5 text-muted-foreground" />
                 Location Mode
               </Label>
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <button
                   type="button"
                   disabled={isSubmitting}
