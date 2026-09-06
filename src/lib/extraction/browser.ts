@@ -18,8 +18,45 @@ const PROFILE_ROOT = path.join(process.cwd(), '.runtime');
 // Keyed by searchId -> its own persistent profile + browser context.
 const contexts = new Map<string, Promise<BrowserContext>>();
 
+// How many extractions are running right now. A SOLO search reuses the warm
+// shared profile DIRECTLY (the way the fast country run worked: whole-US GM
+// served 70 because the profile is a trusted "returning visitor"). Only
+// PARALLEL searches each get their own clone, because two sessions hammering
+// Google from ONE profile flag each other and collapse the feed.
+let activeSearchCount = 0;
+
+export function setActiveSearchCount(n: number): void {
+  activeSearchCount = n;
+}
+
 function profileDir(sessionId: string): string {
+  if (activeSearchCount <= 1) {
+    return WARM_PROFILE_DIR;
+  }
   return path.join(PROFILE_ROOT, `browser-profile-${sessionId.slice(0, 8)}`);
+}
+
+// The warm seed profile. Daily long runs build up Google/Bing trust here
+// (cookies, "returning visitor" signals); a brand-new empty profile shows up
+// as a stranger and gets thin feeds (GM returned 11 on the cold London run
+// vs 70 on the warmed profile). A NEW search's profile is cloned from this
+// seed so every run starts trusted while keeping its own session isolated
+// (so parallel searches never share cookies — see the concurrency-3 change).
+const WARM_PROFILE_DIR = path.join(PROFILE_ROOT, 'browser-profile');
+
+async function seedProfile(dir: string): Promise<void> {
+  if (path.resolve(dir) === path.resolve(WARM_PROFILE_DIR)) return; // solo: reuse warm directly
+  try {
+    await fs.promises.access(WARM_PROFILE_DIR);
+  } catch {
+    return; // No warm seed yet — first run starts empty.
+  }
+  try {
+    await fs.promises.mkdir(path.dirname(dir), { recursive: true });
+    await fs.promises.cp(WARM_PROFILE_DIR, dir, { recursive: true, force: true });
+  } catch {
+    // Not fatal — a cold profile still works, just slower/weaker.
+  }
 }
 
 function currentSessionId(): string {
@@ -34,6 +71,7 @@ async function getContext(): Promise<BrowserContext> {
       const dir = profileDir(sessionId);
       const { chromium } = await import('playwright');
       await fs.promises.mkdir(dir, { recursive: true });
+      await seedProfile(dir);
 
       const launchOptions = {
         channel: BROWSER_CHANNEL as string | undefined,
@@ -127,7 +165,21 @@ export async function withPage<T>(
 // flagged, and rotating the profile restores the full feed. (Followed by
 // closing the whole search's session when the run finishes weakly.)
 export async function resetBrowserSession(): Promise<void> {
+  await resetSessionContext(true);
+}
+
+// Closes THIS extraction's browser context WITHOUT deleting its profile.
+// Called when a search finishes so a solo warm-profile session hands Chrome
+// back cleanly (a second launch on the same dir fails while the first
+// context's Chrome holds the lock). Cookies/trust persist on disk — the warm
+// profile stays warm for the next run.
+export async function closeSessionContext(): Promise<void> {
+  await resetSessionContext(false);
+}
+
+async function resetSessionContext(deleteProfile: boolean): Promise<void> {
   const sessionId = currentSessionId();
+  const dir = profileDir(sessionId);
   const previous = contexts.get(sessionId);
   contexts.delete(sessionId);
   if (previous) {
@@ -138,9 +190,13 @@ export async function resetBrowserSession(): Promise<void> {
       // Browser may already be gone.
     }
   }
-  try {
-    await fs.promises.rm(profileDir(sessionId), { recursive: true, force: true });
-  } catch {
-    // Best-effort profile cleanup.
+  // Only discard a per-search COPY. The warm shared profile is never wiped —
+  // its Google trust is what makes solo country-wide searches fast.
+  if (deleteProfile && path.resolve(dir) !== path.resolve(WARM_PROFILE_DIR)) {
+    try {
+      await fs.promises.rm(dir, { recursive: true, force: true });
+    } catch {
+      // Best-effort profile cleanup.
+    }
   }
 }

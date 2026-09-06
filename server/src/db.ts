@@ -3,7 +3,7 @@ import { resolve } from 'node:path';
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
 import { config } from './config';
-import type { Lead, LeadNote, LeadSource, Search, SearchLead } from '@/types';
+import type { Lead, LeadNote, LeadSource, Search, SearchLead, SupportMessage, SupportThread } from '@/types';
 
 /** node:sqlite requires every bound value to be a SQLInputValue; casts the
     dynamic `unknown[]` parameter lists used by the query builders. */
@@ -43,6 +43,9 @@ db.exec(schema);
   }
   if (!userCols.some((c) => c.name === 'password_changed_at')) {
     db.exec('ALTER TABLE users ADD COLUMN password_changed_at TEXT');
+  }
+  if (!userCols.some((c) => c.name === 'onboarding_seen')) {
+    db.exec("ALTER TABLE users ADD COLUMN onboarding_seen INTEGER NOT NULL DEFAULT 0");
   }
   db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email) WHERE email IS NOT NULL');
   db.exec('UPDATE users SET password_changed_at = created_at WHERE password_changed_at IS NULL');
@@ -120,6 +123,33 @@ export function toSearchLead(row: Record<string, unknown>): SearchLead {
     search_id: String(row.search_id),
     lead_id: String(row.lead_id),
     discovered_at: String(row.discovered_at),
+  };
+}
+
+export function toThread(row: Record<string, unknown>): SupportThread {
+  return {
+    id: String(row.id),
+    user_id: String(row.user_id),
+    subject: String(row.subject),
+    status: row.status as SupportThread['status'],
+    message_count: row.message_count !== undefined ? Number(row.message_count) : undefined,
+    last_message: (row.last_message as string) ?? null,
+    last_message_at: (row.last_message_at as string) ?? null,
+    user_username: (row.user_username as string) ?? null,
+    created_at: String(row.created_at),
+    updated_at: String(row.updated_at),
+  };
+}
+
+export function toMessage(row: Record<string, unknown>): SupportMessage {
+  return {
+    id: String(row.id),
+    thread_id: String(row.thread_id),
+    user_id: String(row.user_id),
+    role: (row.role as SupportMessage['role']) ?? 'user',
+    username: String(row.username ?? ''),
+    body: String(row.body),
+    created_at: String(row.created_at),
   };
 }
 

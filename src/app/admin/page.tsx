@@ -7,6 +7,8 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
+import { PasswordInput } from "@/components/ui/password-input";
+import { SupportAdmin } from "@/components/admin/support-admin";
 import { api } from "@/lib/api";
 import type { Search } from "@/types";
 import {
@@ -21,7 +23,9 @@ import {
   XCircle,
   Copy,
   KeyRound,
+  FileDown,
 } from "lucide-react";
+import { buildAdminReport } from "@/lib/report";
 
 interface AdminUser {
   id: string;
@@ -61,7 +65,7 @@ interface AppEvent {
   created_at: string;
 }
 
-type Tab = "users" | "database" | "events" | "sentry" | "config" | "health";
+type Tab = "users" | "database" | "events" | "sentry" | "config" | "health" | "support";
 
 const STATUS = {
   pending: "bg-gray-100 text-gray-700 dark:bg-gray-800/50 dark:text-gray-400",
@@ -84,12 +88,17 @@ export default function AdminPage() {
   const [tab, setTab] = useState<Tab>("users");
 
   const [newUser, setNewUser] = useState({ username: "", password: "", role: "user" });
+  const [showCreate, setShowCreate] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [ok, setOk] = useState<string | null>(null);
   const [expandedUser, setExpandedUser] = useState<string | null>(null);
   const [dbStatus, setDbStatus] = useState<"loading" | "connected" | "disconnected">("loading");
   const [copied, setCopied] = useState<string | null>(null);
+  const [resetFor, setResetFor] = useState<AdminUser | null>(null);
+  const [resetValue, setResetValue] = useState("");
+  const [resetBusy, setResetBusy] = useState(false);
+  const [reporting, setReporting] = useState(false);
 
   const checkDb = useCallback(async () => {
     setDbStatus("loading");
@@ -105,8 +114,12 @@ export default function AdminPage() {
     try {
       setError(null);
       if (t === "users") {
-        const data = await api.get<{ users: AdminUser[] }>("/admin/users");
+        const [data, s] = await Promise.all([
+          api.get<{ users: AdminUser[] }>("/admin/users"),
+          api.get<{ searches: Search[] }>("/search", { limit: 200 }),
+        ]);
         setUsers(data.users);
+        setSearches(s.searches);
       } else if (t === "database") {
         const [ov, s] = await Promise.all([
           api.get<Overview>("/admin/overview"),
@@ -140,8 +153,8 @@ export default function AdminPage() {
   }, [checkDb]);
 
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    load(tab);
+    const timer = window.setTimeout(() => void load(tab), 0);
+    return () => window.clearTimeout(timer);
   }, [tab, load]);
 
   const createUser = async () => {
@@ -185,19 +198,35 @@ export default function AdminPage() {
     }
   };
 
-  const resetPassword = async (u: AdminUser) => {
-    const password = window.prompt(`New password for "${u.username}" (min 8 chars):`);
-    if (!password || password.length < 8) {
-      if (password) setError("Password must be at least 8 characters");
-      return;
-    }
+  const setRole = async (u: AdminUser, role: "admin" | "user") => {
     setError(null);
     setOk(null);
     try {
-      await api.post(`/admin/users/${u.id}/reset-password`, { password });
+      await api.put(`/admin/users/${u.id}`, { role });
+      setOk(`${u.username} is now ${role}`);
+      await load("users");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to update role");
+    }
+  };
+
+  const resetPassword = async (u: AdminUser) => {
+    if (resetValue.length < 8) {
+      setError("Password must be at least 8 characters");
+      return;
+    }
+    setResetBusy(true);
+    setError(null);
+    setOk(null);
+    try {
+      await api.post(`/admin/users/${u.id}/reset-password`, { password: resetValue });
       setOk(`Password reset for ${u.username}. They must log in again.`);
+      setResetFor(null);
+      setResetValue("");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to reset password");
+    } finally {
+      setResetBusy(false);
     }
   };
 
@@ -235,12 +264,12 @@ export default function AdminPage() {
         </div>
       )}
 
-      <div className="flex gap-2 border-b">
-        {(["users", "database", "events", "sentry", "config", "health"] as const).map((t) => (
+      <div className="flex flex-wrap gap-1 border-b">
+        {(["users", "database", "events", "sentry", "config", "health", "support"] as const).map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
-            className={`px-4 py-2 text-sm font-medium border-b-2 -mb-px capitalize ${tab === t ? "border-primary text-foreground" : "border-transparent text-muted-foreground hover:text-foreground"}`}
+            className={`px-3 py-2 text-sm font-medium border-b-2 -mb-px capitalize ${tab === t ? "border-primary text-foreground" : "border-transparent text-muted-foreground hover:text-foreground"}`}
           >
             {t}
           </button>
@@ -249,18 +278,30 @@ export default function AdminPage() {
 
       {tab === "users" && (
         <Card>
-          <CardHeader><CardTitle className="text-base">Users</CardTitle><CardDescription>Manage who can access the CRM.</CardDescription></CardHeader>
+          <CardHeader>
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <CardTitle className="text-base">Users</CardTitle>
+                <CardDescription>Manage who can access the CRM.</CardDescription>
+              </div>
+              <Button variant="outline" size="sm" className="gap-2" onClick={() => setShowCreate(!showCreate)}>
+                <ShieldCheck className="h-4 w-4" />
+                {showCreate ? "Close" : "Add user"}
+              </Button>
+            </div>
+          </CardHeader>
           <CardContent className="space-y-4">
-            <div className="rounded-lg border p-4 space-y-3">
-              <p className="text-sm font-medium">Add user</p>
-              <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
+            {showCreate && (
+              <div className="rounded-lg border p-4 space-y-3">
+                <p className="text-sm font-medium">Create a new account</p>
+                <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
                 <div>
                   <Label className="text-xs text-muted-foreground">Email</Label>
                   <Input value={newUser.username} onChange={(e) => setNewUser({ ...newUser, username: e.target.value })} placeholder="user@example.com" inputMode="email" />
                 </div>
                 <div>
                   <Label className="text-xs text-muted-foreground">Password (min 8)</Label>
-                  <Input value={newUser.password} type="password" onChange={(e) => setNewUser({ ...newUser, password: e.target.value })} placeholder="••••••••" />
+                  <PasswordInput value={newUser.password} onChange={(e) => setNewUser({ ...newUser, password: e.target.value })} placeholder="••••••••" />
                 </div>
                 <div>
                   <Label className="text-xs text-muted-foreground">Role</Label>
@@ -280,38 +321,123 @@ export default function AdminPage() {
                 </div>
               </div>
             </div>
+            )}
 
             <div className="border rounded-lg divide-y">
               {users.map((u) => (
-                <div key={u.id} className="flex items-center justify-between gap-3 p-3">
-                  <div>
+                <div key={u.id}>
+                  <div className="flex items-center justify-between gap-3 p-3">
+                    <button
+                      className="min-w-0 text-left"
+                      onClick={() => setExpandedUser(expandedUser === u.id ? null : u.id)}
+                    >
+                      <div className="flex items-center gap-2">
+                        <span className="font-medium text-sm">{u.username}</span>
+                        <Badge variant={u.role === "admin" ? "default" : "secondary"} className="text-[10px] px-1.5">{u.role}</Badge>
+                        {u.enabled && <Badge variant="outline" className="text-[10px] px-1.5 text-green-600 dark:text-green-400">active</Badge>}
+                        {!u.enabled && <Badge variant="destructive" className="text-[10px] px-1.5">disabled</Badge>}
+                      </div>
+                      <p className="text-xs text-muted-foreground">
+                        {u.email || u.username} · Joined {new Date(u.created_at).toLocaleDateString()}
+                        {u.password_changed_at ? (
+                          <> · Password changed {new Date(u.password_changed_at).toLocaleString()}</>
+                        ) : (
+                          " · Password never changed"
+                        )}
+                      </p>
+                    </button>
                     <div className="flex items-center gap-2">
-                      <span className="font-medium text-sm">{u.username}</span>
-                      <Badge variant={u.role === "admin" ? "default" : "secondary"} className="text-[10px] px-1.5">{u.role}</Badge>
-                      {!u.enabled && <Badge variant="destructive" className="text-[10px] px-1.5">disabled</Badge>}
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-8 gap-1.5"
+                        onClick={() => {
+                          setError(null);
+                          setOk(null);
+                          setResetFor(resetFor?.id === u.id ? null : u);
+                          setResetValue("");
+                        }}
+                      >
+                        <KeyRound className="h-3.5 w-3.5" /> Reset
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-8 gap-1.5"
+                        disabled={u.role === "admin" && u.enabled}
+                        onClick={() => setRole(u, u.role === "admin" ? "user" : "admin")}
+                      >
+                        {u.role === "admin" ? "Make user" : "Make admin"}
+                      </Button>
+                      <Button variant="outline" size="sm" className="h-8" disabled={u.role === "admin"} onClick={() => toggleEnabled(u)}>
+                        {u.enabled ? "Disable" : "Enable"}
+                      </Button>
+                      <Button variant="ghost" size="sm" className="h-8 w-8 p-0 text-destructive hover:text-destructive" disabled={u.role === "admin"} onClick={() => deleteUser(u)}>
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                      <ChevronRight className={`h-4 w-4 text-muted-foreground transition-transform ${expandedUser === u.id ? "rotate-90" : ""}`} />
                     </div>
-                    <p className="text-xs text-muted-foreground">
-                      {u.email || u.username} · Joined {new Date(u.created_at).toLocaleDateString()}
-                      {u.password_changed_at ? (
-                        <> · Password changed {new Date(u.password_changed_at).toLocaleString()}</>
-                      ) : (
-                        " · Password never changed"
-                      )}
-                    </p>
                   </div>
-                  <div className="flex items-center gap-2">
-                    <Button variant="outline" size="sm" className="h-8 gap-1.5" onClick={() => resetPassword(u)}>
-                      <KeyRound className="h-3.5 w-3.5" /> Reset
+                  {expandedUser === u.id && (
+                    <div className="border-t bg-muted/20 px-3 py-2 space-y-1 max-h-[45vh] overflow-auto">
+                      {searches.filter((s) => s.created_by === u.id).length === 0 ? (
+                        <p className="text-xs text-muted-foreground py-2">No searches yet.</p>
+                      ) : (
+                        searches
+                          .filter((s) => s.created_by === u.id)
+                          .map((s) => (
+                            <div key={s.id} className="flex items-center justify-between gap-3 py-1.5 border-b last:border-b-0">
+                              <div className="min-w-0">
+                                <div className="flex items-center gap-2">
+                                  <span className="text-sm truncate">&ldquo;{s.keyword}&rdquo;</span>
+                                  <span className="text-xs text-muted-foreground shrink-0">{s.search_mode === "city" ? s.city : s.country}</span>
+                                </div>
+                                <p className="text-xs text-muted-foreground">
+                                  {fmt(s.created_at)} · {s.enriched_count}/{s.requested_count} enriched
+                                </p>
+                              </div>
+                              <div className="flex items-center gap-2 shrink-0">
+                                <Badge className={`text-[10px] px-1.5 ${STATUS[s.status] ?? "bg-gray-100"}`}>{s.status}</Badge>
+                                <Link href={`/crm?search_id=${s.id}`}>
+                                  <Button variant="outline" size="sm" className="h-7">View leads</Button>
+                                </Link>
+                              </div>
+                            </div>
+                          ))
+                      )}
+                    </div>
+                  )}
+                </div>
+              ))}
+              {resetFor && (
+                <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3 rounded-lg border border-primary/30 bg-muted/30 p-3">
+                  <p className="text-sm text-muted-foreground min-w-0">
+                    New password for{" "}
+                    <span className="font-semibold text-foreground">{resetFor.username}</span>{" "}
+                    (min 8 chars):
+                  </p>
+                  <div className="flex items-center gap-2 flex-1">
+                    <PasswordInput
+                      value={resetValue}
+                      onChange={(e) => setResetValue(e.target.value)}
+                      placeholder="••••••••"
+                      autoComplete="new-password"
+                    />
+                    <Button
+                      size="sm"
+                      onClick={() => resetPassword(resetFor)}
+                      disabled={resetBusy || resetValue.length < 8}
+                      className="gap-1.5"
+                    >
+                      {resetBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <KeyRound className="h-3.5 w-3.5" />}
+                      Save
                     </Button>
-                    <Button variant="outline" size="sm" className="h-8" disabled={u.role === "admin"} onClick={() => toggleEnabled(u)}>
-                      {u.enabled ? "Disable" : "Enable"}
-                    </Button>
-                    <Button variant="ghost" size="sm" className="h-8 w-8 p-0 text-destructive hover:text-destructive" disabled={u.role === "admin"} onClick={() => deleteUser(u)}>
-                      <Trash2 className="h-4 w-4" />
+                    <Button size="sm" variant="ghost" onClick={() => { setResetFor(null); setResetValue(""); }}>
+                      Cancel
                     </Button>
                   </div>
                 </div>
-              ))}
+              )}
             </div>
           </CardContent>
         </Card>
@@ -320,8 +446,37 @@ export default function AdminPage() {
       {tab === "database" && (
         <Card>
           <CardHeader>
-            <CardTitle className="text-base flex items-center gap-2"><Database className="h-4 w-4" /> Database — CRM</CardTitle>
-            <CardDescription>Kis user ne kaun si leads nikali, kab nikali — sab yahan se control karein.</CardDescription>
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <CardTitle className="text-base flex items-center gap-2"><Database className="h-4 w-4" /> Database — CRM</CardTitle>
+                <CardDescription>Which user extracted which leads, and when — all manageable from here.</CardDescription>
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                className="gap-2 shrink-0"
+                disabled={!overview || reporting}
+                onClick={() => {
+                  if (!overview) return;
+                  setReporting(true);
+                  window.setTimeout(() => {
+                    try {
+                      buildAdminReport({
+                        generated_at: new Date(),
+                        totals: overview.totals,
+                        users: overview.users,
+                        system: overview.system,
+                      });
+                    } finally {
+                      setReporting(false);
+                    }
+                  }, 0);
+                }}
+              >
+                {reporting ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileDown className="h-4 w-4" />}
+                Report (PDF)
+              </Button>
+            </div>
           </CardHeader>
           <CardContent className="space-y-4">
             {overview ? (
@@ -422,12 +577,12 @@ export default function AdminPage() {
           <CardHeader>
             <CardTitle className="text-base">Sentry — Errors</CardTitle>
             <CardDescription>
-              Backend aur browser ke errors yahan log hote hain (last 24h: {errors24h ?? "…"} client errors).
+              Backend and browser errors are logged here (last 24h: {errors24h ?? "…"} client errors).
             </CardDescription>
           </CardHeader>
           <CardContent>
             {errors.length === 0 ? (
-              <p className="text-sm text-muted-foreground py-8 text-center">Koi error nahi — sab kuch sahi chal raha hai.</p>
+              <p className="text-sm text-muted-foreground py-8 text-center">No errors — everything is running fine.</p>
             ) : (
               <div className="border rounded-lg divide-y max-h-[60vh] overflow-auto">
                 {errors.map((e) => (
@@ -561,6 +716,8 @@ PLAYWRIGHT_BROWSERS_PATH=D:\\Office work\\yawar leads\\playwright-browsers`}
           </CardContent>
         </Card>
       )}
+
+      {tab === "support" && <SupportAdmin />}
     </div>
   );
 }

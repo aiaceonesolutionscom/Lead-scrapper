@@ -511,7 +511,7 @@ export default function CRMPage() {
                               </div>
                             </div>
                           </div>
-                          <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-muted-foreground pl-6">
+                          <div className="grid grid-cols-1 gap-y-1 gap-x-4 text-xs text-muted-foreground pl-6 min-[400px]:grid-cols-2">
                             {lead.phone && <span>Phone: {lead.phone}</span>}
                             {lead.email && <span className="truncate">Email: {lead.email}</span>}
                             {lead.city && (

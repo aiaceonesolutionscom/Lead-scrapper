@@ -6,6 +6,7 @@ import { discoverFromBing } from './bing-search';
 import { isIllFormedBusiness } from './filters';
 import { resetBrowserSession } from '../browser';
 import { normalizeString, extractDomain } from '@/lib/utils';
+import { hasJunkUrl } from '../relevance';
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -167,6 +168,10 @@ export async function discoverBusinesses(
   for (const business of allBusinesses) {
     // Drop ill-formed / garbage candidates before they reach enrichment
     if (isIllFormedBusiness(business.name)) continue;
+    // Hard-drop global corporate/product/marketplace domains (Google Maps
+    // and OSM can occasionally surface e.g. a domain-only listing for a
+    // recognised brand that has no real local contact).
+    if (hasJunkUrl(business.website || business.source_url || '')) continue;
 
     const key = getDeduplicationKey(business);
     if (!key) continue;

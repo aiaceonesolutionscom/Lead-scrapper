@@ -11,10 +11,13 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { BrandLoader } from "@/components/shared/brand-loader";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { PasswordInput } from "@/components/ui/password-input";
 import { cn } from "@/lib/utils";
 import { api, type AuthUser } from "@/lib/api";
+import { ThemeToggle } from "@/components/shared/theme-toggle";
 
 function LoginForm() {
   const searchParams = useSearchParams();
@@ -26,6 +29,9 @@ function LoginForm() {
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  // Honeypot — invisible to humans, bots autofill it. If non-empty the
+  // backend silently rejects the submission as a bot.
+  const [companyWebsite, setCompanyWebsite] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
@@ -44,6 +50,7 @@ function LoginForm() {
         email: email.trim(),
         username: email.trim(),
         password,
+        company_website: companyWebsite,
       });
       const dest = user?.role === "admin" ? "/admin" : next;
       window.location.assign(dest);
@@ -54,7 +61,10 @@ function LoginForm() {
   }
 
   return (
-    <div className="flex min-h-full items-center justify-center p-4">
+    <div className="flex min-h-full items-center justify-center p-4 relative">
+      <div className="absolute top-4 right-4">
+        <ThemeToggle />
+      </div>
       <div className="w-full max-w-sm space-y-6">
         <div className="flex flex-col items-center gap-3 text-center">
           <div
@@ -86,6 +96,18 @@ function LoginForm() {
                 </div>
               )}
 
+              {/* Honeypot — visually hidden, real bots autofill it. */}
+              <input
+                type="text"
+                name="company_website"
+                value={companyWebsite}
+                onChange={(e) => setCompanyWebsite(e.target.value)}
+                className="sr-only"
+                tabIndex={-1}
+                autoComplete="off"
+                aria-hidden="true"
+              />
+
               <div className="space-y-2">
                 <Label htmlFor="username">Email or username</Label>
                 <Input
@@ -101,9 +123,8 @@ function LoginForm() {
 
               <div className="space-y-2">
                 <Label htmlFor="password">Password</Label>
-                <Input
+                <PasswordInput
                   id="password"
-                  type="password"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   autoComplete="current-password"
@@ -123,8 +144,9 @@ function LoginForm() {
           </CardContent>
         </Card>
 
-        <p className="text-center text-xs text-muted-foreground">
-          Lead Extractor + CRM v1.0
+        <p className="text-center text-xs text-muted-foreground space-y-0.5">
+          <span className="block">Lead Extractor + CRM v1.0</span>
+          <span className="block text-muted-foreground/70">Built by MJ Labs · A product by Muneeb Jawwad</span>
         </p>
       </div>
     </div>
@@ -136,7 +158,7 @@ export default function LoginPage() {
     <Suspense
       fallback={
         <div className="flex h-full items-center justify-center">
-          <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+          <BrandLoader label="Loading login…" />
         </div>
       }
     >

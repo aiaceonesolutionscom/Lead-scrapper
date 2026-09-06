@@ -24,7 +24,11 @@ const NON_BUSINESS_TITLE_PATTERNS = [
   /^top\s*\d+/i,
   /^best\s*\d+/i,
   /^\d+\+?\s*best\b/i,
+  /^\d+\s+(?:types?|kinds?|ways?|reasons?|things?|examples?|varieties?|brands?)\b/i,
   /\bvs\.?\b/i,
+  // Aggregator / listicle pages ("Best Salt Dealers in Houston") that are
+  // directories rather than actual businesses.
+  /^best\b.{0,80}\b(?:of|in|near)\b/i,
 ];
 
 const NON_BUSINESS_TITLE_EXTRA_ONLY = [

@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { BrandLoader } from "@/components/shared/brand-loader";
 import {
   Table,
   TableBody,
@@ -19,7 +20,6 @@ import {
   BadgeCheck,
   ArrowRight,
   TrendingUp,
-  Loader2,
   AlertCircle,
 } from "lucide-react";
 import type { Search as SearchType, Lead, DashboardStats } from "@/types";
@@ -136,15 +136,15 @@ export default function DashboardPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h1 className="text-2xl font-bold tracking-tight">Dashboard</h1>
           <p className="text-sm text-muted-foreground">
             Overview of your lead extraction and CRM activity.
           </p>
         </div>
-        <Link href="/search/new">
-          <Button className="gap-2">
+        <Link href="/search/new" className="w-full sm:w-auto">
+          <Button className="gap-2 w-full sm:w-auto">
             <TrendingUp className="h-4 w-4" />
             New Search
           </Button>
@@ -159,13 +159,11 @@ export default function DashboardPage() {
       )}
 
       {loading ? (
-        <div className="flex items-center justify-center py-24">
-          <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
-        </div>
+        <BrandLoader label="Loading dashboard…" className="py-24" />
       ) : (
         <>
           {/* Stats Grid */}
-          <div className="grid gap-4 grid-cols-2 md:grid-cols-3">
+          <div className="grid gap-4 grid-cols-2 lg:grid-cols-3">
             {statCards.map((card) => (
               <Card key={card.title}>
                 <CardContent className="p-4">

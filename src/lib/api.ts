@@ -6,10 +6,9 @@
  * server can identify the logged-in user. Any 401 redirects to /login.
  */
 
-export const API_BASE_URL =
-  process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:5000";
+export const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "";
 
-const API_PREFIX = `${API_BASE_URL}/api`;
+const API_PREFIX = API_BASE_URL ? `${API_BASE_URL}/api` : "/api";
 
 export class ApiError extends Error {
   status: number;
@@ -128,6 +127,7 @@ export interface AuthUser {
   email: string | null;
   role: "admin" | "user";
   enabled: boolean;
+  onboarding_seen: boolean;
   password_changed_at: string | null;
   created_at: string;
 }
@@ -139,4 +139,63 @@ export async function getCurrentUser(): Promise<AuthUser | null> {
   } catch {
     return null;
   }
+}
+
+/** Mark the first-login onboarding tour as seen (or hidden). */
+export async function markOnboardingSeen(seen = true): Promise<void> {
+  await api.post("/auth/onboarding", { seen });
+}
+
+export interface NotificationsResponse {
+  notifications: import("@/types").AppNotification[];
+  unread: number;
+}
+
+/** Latest in-app notifications + unread count for the current user. */
+export async function getNotifications(): Promise<NotificationsResponse> {
+  return api.get<NotificationsResponse>("/notifications");
+}
+
+/** Mark a single, a set, or (with no ids) all notifications as read. */
+export async function markNotificationsRead(ids?: string[]): Promise<void> {
+  await api.post("/notifications/read", ids && ids.length ? { ids } : { all: true });
+}
+
+export interface SupportThreadListResponse {
+  threads: import("@/types").SupportThread[];
+}
+
+export interface SupportThreadDetailResponse {
+  thread: import("@/types").SupportThread;
+  messages: import("@/types").SupportMessage[];
+}
+
+/** The current user's support threads (newest activity first). */
+export async function getMyThreads(): Promise<SupportThreadListResponse> {
+  return api.get<SupportThreadListResponse>("/support");
+}
+
+/** All support threads (admin only). */
+export async function getAllThreads(): Promise<SupportThreadListResponse> {
+  return api.get<SupportThreadListResponse>("/support/admin/list");
+}
+
+/** Open a new support thread with its first message. */
+export async function createThread(subject: string, message: string): Promise<SupportThreadDetailResponse> {
+  return api.post<SupportThreadDetailResponse>("/support", { subject, message });
+}
+
+/** Fetch a thread's messages (owner or admin). */
+export async function getThreadMessages(threadId: string): Promise<SupportThreadDetailResponse> {
+  return api.get<SupportThreadDetailResponse>(`/support/${threadId}`);
+}
+
+/** Append a message to a thread (owner or admin). */
+export async function postThreadMessage(threadId: string, body: string): Promise<void> {
+  await api.post(`/support/${threadId}/messages`, { body });
+}
+
+/** Close ("closed") or reopen ("open") a thread (owner or admin). */
+export async function setThreadStatus(threadId: string, status: "open" | "closed"): Promise<void> {
+  await api.post(`/support/${threadId}/status`, { status });
 }

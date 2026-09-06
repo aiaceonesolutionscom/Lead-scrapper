@@ -75,6 +75,14 @@ function extractPhones(text: string): string[] {
       // almost always an ID (e.g. 615724432203 came from a FB page id).
       const hasSeperator = /[()\s.-]/.test(m);
       if (!hasSeperator && digits.length >= 12) return false;
+      // An international-format number starting with "+" must not have an
+      // absurdly long local part (> 11 digits) — real phone numbers never
+      // need that many; this catches data-entry or page-ID junk like
+      // "+1 7740563 83985".
+      if (m.trim().startsWith('+') && digits.length > 12) return false;
+      // Five or more consecutive identical digits inside the number are
+      // almost certainly a placeholder, not a real line.
+      if (/(\d)\1{4}/.test(digits)) return false;
       // Skip IP-ish "1.2.3.4" style matches.
       if (/^\d{1,3}\.\d{1,3}\.\d{1,3}/.test(m)) return false;
       return true;
@@ -221,18 +229,25 @@ export async function searchGoogleForBusiness(
   businessName: string,
   city: string,
   country: string,
-  _missingFields: string[]
+  missingFields: string[]
 ): Promise<SearchFallbackResult> {
   const result: SearchFallbackResult = {};
   let websiteDomain: string | undefined;
 
+  const wantWebsite = missingFields.includes('website');
+  const wantInstagram = missingFields.includes('instagram');
+  const wantFacebook = missingFields.includes('facebook');
+  const wantLinkedin = missingFields.includes('linkedin');
+
   // Probe website first (so a discovered domain can validate later socials),
-  // then each social individually. Email/phone come from the site visit below.
+  // then each social individually — ONLY for fields that are actually still
+  // missing. Skipping unneeded probes is what keeps enrichment fast: hunting
+  // a social handle the business never had wastes two more Bing round-trips.
   const probes: { query: string; field: 'website' | 'instagram' | 'facebook' | 'linkedin' }[] = [
-    { query: '', field: 'website' },
-    { query: 'instagram', field: 'instagram' },
-    { query: 'facebook', field: 'facebook' },
-    { query: 'linkedin', field: 'linkedin' },
+    ...(wantWebsite ? [{ query: '', field: 'website' as const }] : []),
+    ...(wantInstagram ? [{ query: 'instagram', field: 'instagram' as const }] : []),
+    ...(wantFacebook ? [{ query: 'facebook', field: 'facebook' as const }] : []),
+    ...(wantLinkedin ? [{ query: 'linkedin', field: 'linkedin' as const }] : []),
   ];
 
   await withPage(async (page) => {
@@ -243,9 +258,9 @@ export async function searchGoogleForBusiness(
       try {
         await page.goto(`${BING_URL}?${new URLSearchParams({ q }).toString()}`, {
           waitUntil: 'domcontentloaded',
-          timeout: 30000,
+          timeout: 20000,
         });
-        await page.waitForTimeout(1400);
+        await page.waitForTimeout(900);
 
         if (field === 'website') {
           const rawLinks = (await page.evaluate(() => {

@@ -3,6 +3,7 @@ import type { Response } from 'express';
 import { compare, hash, hashSync } from 'bcryptjs';
 import { db, nowIso } from './db';
 import { config } from './config';
+import { isStrongPassword } from './password-policy';
 
 export interface AppUser {
   id: string;
@@ -10,6 +11,7 @@ export interface AppUser {
   email: string | null;
   role: 'admin' | 'user';
   enabled: boolean;
+  onboarding_seen: boolean;
   password_changed_at: string | null;
   created_at: string;
   updated_at: string;
@@ -23,6 +25,7 @@ export function toAppUser(row: object): AppUser {
     email: (r.email as string) ?? null,
     role: r.role as AppUser['role'],
     enabled: Boolean(r.enabled),
+    onboarding_seen: Boolean(r.onboarding_seen),
     password_changed_at: (r.password_changed_at as string) ?? null,
     created_at: String(r.created_at),
     updated_at: String(r.updated_at),
@@ -138,8 +141,8 @@ export function createBootstrapAdminIfNeeded(): void {
   const username = config.adminUsername.trim();
   const password = config.adminPassword;
   if (!username || !password) return;
-  if (password.length < 8) {
-    throw new Error('ADMIN_PASSWORD must be at least 8 characters');
+  if (!isStrongPassword(password)) {
+    throw new Error('ADMIN_PASSWORD must be at least 10 characters with uppercase, lowercase, digit, and special character');
   }
   // Synchronous hash so the admin exists before the first login can arrive
   // (the listen callback may return before an async hash resolves).

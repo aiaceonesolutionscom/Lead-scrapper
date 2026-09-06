@@ -3,6 +3,7 @@ import type { DiscoveryBusiness } from '@/types';
 import { countryNameToISO2 } from '@/lib/utils/countries';
 import { withPage } from '../browser';
 import { isLikelyNonBusinessResult } from './filters';
+import { isJunkEngineResult, isRelevantToKeyword, buildKeywordTokens } from '../relevance';
 
 const DUCKDUCKGO_URL = 'https://html.duckduckgo.com/html/';
 
@@ -74,6 +75,13 @@ function parseResultsHtml(
 
     if (!title) return;
     if (isLikelyNonBusinessResult(title, href)) return;
+    // Relevance gate: an SERP hit is only a lead candidate when it actually
+    // matches the search keyword AND looks like a real business page, not a
+    // driver download / product / corporate page. Non-matches are hard-dropped
+    // here so they never consume enrichment time or pollute the DB.
+    const keywordTokensPresent = buildKeywordTokens(keyword).length > 0;
+    if (isJunkEngineResult(title, href, keywordTokensPresent)) return;
+    if (keywordTokensPresent && !isRelevantToKeyword(keyword, `${title} ${snippet} ${website}`)) return;
 
     let cleanedName = title
       .replace(/\s*[-–|].*$/, '')

@@ -73,7 +73,7 @@ export function buildCitySchedule(params: {
 }): Schedule {
   const primary = params.city?.trim() || '';
 
-  if (params.searchMode === 'country' && params.requestedCount >= 60) {
+  if (params.searchMode === 'country' && params.requestedCount >= 10) {
     return { locations: ['', ...US_CITIES] };
   }
 

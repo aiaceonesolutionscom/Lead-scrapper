@@ -5,6 +5,7 @@ import { useParams, useRouter } from "next/navigation";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { BrandLoader } from "@/components/shared/brand-loader";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
@@ -202,10 +203,7 @@ export default function LeadDetailPage() {
 
   if (loading) {
     return (
-      <div className="flex flex-col items-center justify-center gap-4 py-24">
-        <Loader2 className="h-10 w-10 animate-spin text-muted-foreground" />
-        <p className="text-muted-foreground text-sm">Loading lead...</p>
-      </div>
+      <BrandLoader label="Loading lead…" className="py-24" />
     );
   }
 

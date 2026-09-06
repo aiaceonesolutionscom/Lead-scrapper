@@ -3,11 +3,14 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { getCurrentUser, type AuthUser } from "@/lib/api";
 import { installErrorReporter } from "@/lib/error-report";
 import { Sidebar } from "@/components/shared/sidebar";
+import { ThemeToggle } from "@/components/shared/theme-toggle";
+import { BrandLoader } from "@/components/shared/brand-loader";
+import { OnboardingModal } from "@/components/shared/onboarding-modal";
+import { markOnboardingSeen } from "@/lib/api";
 
 export function AuthGate({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
@@ -29,11 +32,15 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
     if (user === null || user === undefined) return;
     const isAdmin = user.role === "admin";
     if (isAdmin) {
+      // Admins manage everything: admin panel, CRM, and the search workflow
+      // (needed to watch live extraction logs at /search/[id]).
       const allowed =
         pathname.startsWith("/admin") ||
         pathname.startsWith("/crm") ||
         pathname.startsWith("/profile") ||
-        pathname.startsWith("/settings");
+        pathname.startsWith("/settings") ||
+        pathname.startsWith("/search") ||
+        pathname.startsWith("/search-history");
       if (!allowed) router.replace("/admin");
     } else if (pathname.startsWith("/admin") || pathname.startsWith("/admin/")) {
       router.replace("/search/new");
@@ -47,7 +54,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
   if (user === undefined) {
     return (
       <div className="flex h-full items-center justify-center">
-        <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+        <BrandLoader label="Signing you in…" />
       </div>
     );
   }
@@ -77,8 +84,26 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
     <div className="flex h-full">
       <Sidebar user={user} />
       <main className="flex-1 overflow-auto">
-        <div className="p-4 md:p-6 lg:p-8">{children}</div>
+        <div className="pt-16 px-4 pb-4 md:p-6 lg:p-8">
+          <div className="md:hidden flex items-center justify-between gap-2 py-1">
+            <span className="text-lg font-bold tracking-tight">LE</span>
+            <ThemeToggle />
+          </div>
+          {children}
+          <footer className="mt-10 border-t pt-4 text-center text-xs text-muted-foreground">
+            © 2026 MJ Labs · A product by Muneeb Jawwad
+          </footer>
+        </div>
       </main>
+      {user && !user.onboarding_seen && (
+        <OnboardingModal
+          username={user.username}
+          onDone={async () => {
+            await markOnboardingSeen(true).catch(() => {});
+            setUser({ ...user, onboarding_seen: true });
+          }}
+        />
+      )}
     </div>
   );
 }

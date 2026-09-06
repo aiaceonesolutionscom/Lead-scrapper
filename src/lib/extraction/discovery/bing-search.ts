@@ -3,6 +3,7 @@ import type { DiscoveryBusiness } from '@/types';
 import { countryNameToISO2 } from '@/lib/utils/countries';
 import { withPage } from '../browser';
 import { isLikelyNonBusinessResult } from './filters';
+import { isJunkEngineResult, isRelevantToKeyword, buildKeywordTokens } from '../relevance';
 
 const BING_URL = 'https://www.bing.com/search';
 
@@ -73,6 +74,13 @@ function parseResultsHtml(
 
     if (!title) return;
     if (isLikelyNonBusinessResult(title, href)) return;
+    // Relevance gate: same as DuckDuckGo — only real businesses that match the
+    // keyword survive. Bing wraps result links in /ck/a redirects, so the
+    // hostname here is usually bing.com; the title/snippet check is what
+    // actually filters junk, NOT the domain.
+    const keywordTokensPresent = buildKeywordTokens(keyword).length > 0;
+    if (isJunkEngineResult(title, href, keywordTokensPresent)) return;
+    if (keywordTokensPresent && !isRelevantToKeyword(keyword, `${title} ${snippet} ${website}`)) return;
 
     let cleanedName = title
       .replace(/\s*[-–|].*$/, '')

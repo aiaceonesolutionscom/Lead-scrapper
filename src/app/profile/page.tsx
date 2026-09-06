@@ -3,11 +3,13 @@
 import { useEffect, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
+import { PasswordInput } from "@/components/ui/password-input";
+import { BrandLoader } from "@/components/shared/brand-loader";
 import { api, getCurrentUser, type AuthUser } from "@/lib/api";
 import { AlertCircle, CheckCircle2, Loader2, KeyRound } from "lucide-react";
+import { isPasswordStrong, passwordErrors, passwordScore, PASSWORD_RULES } from "@/lib/password-policy";
 
 function initials(name: string): string {
   return name
@@ -40,8 +42,8 @@ export default function ProfilePage() {
   const changePassword = async () => {
     setError(null);
     setOk(null);
-    if (newPassword.length < 8) {
-      setError("New password must be at least 8 characters");
+    if (!isPasswordStrong(newPassword)) {
+      setError(passwordErrors(newPassword).join('. '));
       return;
     }
     if (newPassword !== confirm) {
@@ -66,7 +68,7 @@ export default function ProfilePage() {
   if (user === undefined) {
     return (
       <div className="flex h-full items-center justify-center">
-        <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+        <BrandLoader label="Loading profile…" />
       </div>
     );
   }
@@ -137,16 +139,35 @@ export default function ProfilePage() {
           )}
           <div className="space-y-2">
             <Label htmlFor="current">Current password</Label>
-            <Input id="current" type="password" value={currentPassword} onChange={(e) => setCurrentPassword(e.target.value)} autoComplete="current-password" />
+            <PasswordInput id="current" value={currentPassword} onChange={(e) => setCurrentPassword(e.target.value)} autoComplete="current-password" />
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div className="space-y-2">
               <Label htmlFor="new">New password</Label>
-              <Input id="new" type="password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} autoComplete="new-password" />
+              <PasswordInput id="new" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} autoComplete="new-password" />
+              {newPassword.length > 0 && (
+                <div className="space-y-1.5">
+                  <div className="flex gap-1">
+                    {PASSWORD_RULES.map((rule) => (
+                      <div
+                        key={rule.label}
+                        className={`h-1 flex-1 rounded-full transition-colors ${
+                          rule.test(newPassword)
+                            ? "bg-green-500"
+                            : "bg-muted"
+                        }`}
+                      />
+                    ))}
+                  </div>
+                  <p className={`text-xs ${isPasswordStrong(newPassword) ? "text-green-600 dark:text-green-400" : "text-muted-foreground"}`}>
+                    {isPasswordStrong(newPassword) ? "Strong password" : `${passwordScore(newPassword)}/${PASSWORD_RULES.length} requirements met`}
+                  </p>
+                </div>
+              )}
             </div>
             <div className="space-y-2">
               <Label htmlFor="confirm">Confirm new password</Label>
-              <Input id="confirm" type="password" value={confirm} onChange={(e) => setConfirm(e.target.value)} autoComplete="new-password" />
+              <PasswordInput id="confirm" value={confirm} onChange={(e) => setConfirm(e.target.value)} autoComplete="new-password" />
             </div>
           </div>
           <Button onClick={changePassword} disabled={busy || !currentPassword || !newPassword} className="gap-2">

@@ -12,7 +12,6 @@
     "resolvePackageJsonExports": true,
     "isolatedModules": true,
     "types": ["node"],
-    "baseUrl": ".",
     "paths": {
       "@/*": ["../src/*"]
     }

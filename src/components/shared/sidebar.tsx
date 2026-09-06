@@ -18,13 +18,17 @@ import {
   LogOut,
   Shield,
   UserCircle,
+  LifeBuoy,
 } from "lucide-react";
+import { ThemeToggle } from "@/components/shared/theme-toggle";
+import { NotificationsBell } from "@/components/shared/notifications-bell";
 
 const userNav = [
   { href: "/", label: "Dashboard", icon: LayoutDashboard },
   { href: "/search/new", label: "New Search", icon: Search },
   { href: "/search-history", label: "Search History", icon: History },
   { href: "/crm", label: "CRM", icon: Users },
+  { href: "/support", label: "Support", icon: LifeBuoy },
   { href: "/profile", label: "Profile", icon: UserCircle },
   { href: "/settings", label: "Settings", icon: Settings },
 ];
@@ -84,12 +88,15 @@ export function Sidebar({ user }: { user?: AuthUser | null }) {
             </div>
             <span className="font-semibold text-sm">Lead Extractor</span>
           </Link>
-          <button
-            onClick={() => setMobileOpen(false)}
-            className="rounded-md p-1 hover:bg-muted md:hidden"
-          >
-            <X className="h-4 w-4" />
-          </button>
+          <div className="flex items-center gap-1">
+            <NotificationsBell />
+            <button
+              onClick={() => setMobileOpen(false)}
+              className="rounded-md p-1 hover:bg-muted md:hidden"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
         </div>
 
         {/* Navigation */}
@@ -128,6 +135,7 @@ export function Sidebar({ user }: { user?: AuthUser | null }) {
                 <p className="truncate text-sm font-medium">{user.username}</p>
                 <p className="text-xs text-muted-foreground capitalize">{user.role}</p>
               </div>
+              <ThemeToggle />
             </div>
           )}
           <Button

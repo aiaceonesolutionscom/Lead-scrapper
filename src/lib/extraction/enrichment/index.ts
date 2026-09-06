@@ -4,18 +4,32 @@ import { searchGoogleForBusiness } from './google-search';
 import { validatePhone } from '@/lib/utils/phone';
 import { verifyEmailDomain } from '@/lib/utils/email-verify';
 import { isCredibleWebsiteMatch } from '@/lib/utils';
+import { isRelevantToKeyword, RELEVANCE_GATED_SOURCES } from '../relevance';
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-export async function enrichBusiness(business: DiscoveryBusiness): Promise<EnrichedBusiness> {
+export async function enrichBusiness(business: DiscoveryBusiness, keyword?: string): Promise<EnrichedBusiness> {
   const enriched: EnrichedBusiness = {
     ...business,
     sources: {},
     verified: false,
     confidence: 'low',
   };
+
+  // Relevance gate (safety net): engine-sourced candidates whose final
+  // data does not match the search keyword are marked non-relevant even
+  // when a valid phone/email was scraped.  This catches any leftover junk
+  // that slipped through the discovery-level relevance gate.
+  const isEngineSource = RELEVANCE_GATED_SOURCES.has(business.source);
+  const relevant = isEngineSource && keyword
+    ? isRelevantToKeyword(keyword, [business.name, business.website || '', business.address || '', business.source_url || ''].join(' '))
+    : true;
+  enriched.relevant = relevant;
+  if (!relevant) {
+    console.log(`[Enrichment] ${business.name} — not relevant to "${keyword}" (engine-sourced), will not verify`);
+  }
 
   console.log(`[Enrichment] ${business.name} — starting enrichment (phone: ${business.phone || 'none'}, website: ${business.website || 'none'}, email: ${business.email || 'none'})`);
 
@@ -101,103 +115,8 @@ export async function enrichBusiness(business: DiscoveryBusiness): Promise<Enric
 
   console.log(`[Enrichment] ${business.name} — after website scrape: phone=${enriched.phone || 'none'}, email=${enriched.email || 'none'}, website=${enriched.website || 'none'}`);
 
-  // Step 1b: Google Search fallback (source #2) — only for fields still
-  // missing after Google Maps showed its listing data. Skip entirely when
-  // the business already has a phone; that's the main contact channel and
-  // the costliest to search for.
-  const missingFields: string[] = [];
-  if (!enriched.phone) missingFields.push('phone');
-  if (!enriched.email) missingFields.push('email');
-  if (!enriched.website) missingFields.push('website');
-  if (!enriched.instagram) missingFields.push('instagram');
-  if (!enriched.facebook) missingFields.push('facebook');
-  if (!enriched.linkedin) missingFields.push('linkedin');
-
-  if (missingFields.length > 0) {
-    try {
-      console.log(`[Enrichment] ${business.name} — Google Search fallback (missing: ${missingFields.join(', ')})`);
-      const searchResult = await searchGoogleForBusiness(
-        business.name,
-        business.city || '',
-        business.country || '',
-        missingFields
-      );
-
-      if (searchResult.phone && !enriched.phone) {
-        // Sanity-filter before assigning: a bare 12+ digit run with no real
-        // separators is almost always a sliced Facebook/page ID, not a phone.
-        const digitsOnly = searchResult.phone.replace(/\D/g, '');
-        const hasSeperator = /[()\s.-]/.test(searchResult.phone);
-        if (digitsOnly.length <= 15 && (hasSeperator || digitsOnly.length < 12)) {
-          enriched.phone = searchResult.phone;
-          enriched.sources.phone = { value: searchResult.phone, source: 'google_search', confidence: 'medium' };
-        }
-      }
-      if (searchResult.email && !enriched.email) {
-        enriched.email = searchResult.email;
-        enriched.sources.email = { value: searchResult.email, source: 'google_search', confidence: 'medium' };
-      }
-      if (searchResult.website && !enriched.website && isCredibleWebsiteMatch(searchResult.website, business.name)) {
-        enriched.website = searchResult.website;
-        enriched.sources.website = { value: searchResult.website, source: 'google_search', confidence: 'medium' };
-      }
-      if (searchResult.instagram && !enriched.instagram) {
-        enriched.instagram = searchResult.instagram;
-        enriched.sources.instagram = { value: searchResult.instagram, source: 'google_search', confidence: 'medium' };
-      }
-      if (searchResult.facebook && !enriched.facebook) {
-        enriched.facebook = searchResult.facebook;
-        enriched.sources.facebook = { value: searchResult.facebook, source: 'google_search', confidence: 'medium' };
-      }
-      if (searchResult.linkedin && !enriched.linkedin) {
-        enriched.linkedin = searchResult.linkedin;
-        enriched.sources.linkedin = { value: searchResult.linkedin, source: 'google_search', confidence: 'medium' };
-      }
-      console.log(`[Enrichment] ${business.name} — Google Search filled: phone=${enriched.phone || 'none'}, email=${enriched.email || 'none'}, website=${enriched.website || 'none'}, ig=${enriched.instagram || 'none'}, fb=${enriched.facebook || 'none'}, li=${enriched.linkedin || 'none'}`);
-    } catch (error) {
-      console.log(`[Enrichment] ${business.name} — Google Search failed (non-fatal)`);
-      console.error(error);
-    }
-  }
-
-  // Step 1c: if the search fallback found a (credible) website and we didn't
-  // already scrape one, run the full website scraper on it for deeper
-  // email/socials.
-  if (enriched.website && !wasWebsiteScraped && isCredibleWebsiteMatch(enriched.website, business.name)) {
-    try {
-      const scraped = await scrapeWebsite(enriched.website);
-
-      if (scraped.phone && !enriched.phone) {
-        enriched.phone = scraped.phone;
-        enriched.sources.phone = scraped.sources.phone!;
-      }
-      if (scraped.email && !enriched.email) {
-        enriched.email = scraped.email;
-        enriched.sources.email = scraped.sources.email!;
-      }
-      if (scraped.instagram && !enriched.instagram) {
-        enriched.instagram = scraped.instagram;
-        enriched.sources.instagram = scraped.sources.instagram!;
-      }
-      if (scraped.facebook && !enriched.facebook) {
-        enriched.facebook = scraped.facebook;
-        enriched.sources.facebook = scraped.sources.facebook!;
-      }
-      if (scraped.linkedin && !enriched.linkedin) {
-        enriched.linkedin = scraped.linkedin;
-        enriched.sources.linkedin = scraped.sources.linkedin!;
-      }
-      if (scraped.contactPerson && !enriched.contact_person) {
-        enriched.contact_person = scraped.contactPerson;
-        enriched.sources.contact_person = scraped.sources.contact_person!;
-      }
-      console.log(`[Enrichment] ${business.name} — website scrape (found via search): email=${enriched.email || 'none'}, ig=${enriched.instagram || 'none'}, fb=${enriched.facebook || 'none'}, li=${enriched.linkedin || 'none'}`);
-    } catch (error) {
-      console.log(`[Enrichment] ${business.name} — website re-scrape failed (non-fatal)`);
-    }
-  }
-
-  // Step 2: Validate phone number
+  // Step 2: Validate phone number FIRST so the expensive web-search fallback
+  // below can be skipped entirely once we already hold a trustworthy contact.
   if (enriched.phone) {
     // Sliced-ID guard (any source, discovery included): a bare 12+ digit run
     // with no separators and no "+" country prefix is almost always an ID
@@ -256,6 +175,169 @@ export async function enrichBusiness(business: DiscoveryBusiness): Promise<Enric
     };
   }
 
+  // Step 1b: Google Search fallback (source #2) — but ONLY when we still lack
+  // ANY verified contact (a valid phone OR a mail-accepting email from a
+  // trusted source). Once a business already has a trustworthy phone from
+  // Google Maps / OSM / its own website it is ALREADY "verified": chasing the
+  // remaining email + socials across 4-5 Bing page loads per business was the
+  // #1 reason enrichment crawled. Email/socials for such businesses are still
+  // attempted via their own website (step 1) — the fast, free path.
+  const missingFields: string[] = [];
+  if (!enriched.phone) missingFields.push('phone');
+  if (!enriched.email) missingFields.push('email');
+  if (!enriched.website) missingFields.push('website');
+  if (!enriched.instagram) missingFields.push('instagram');
+  if (!enriched.facebook) missingFields.push('facebook');
+  if (!enriched.linkedin) missingFields.push('linkedin');
+
+  const alreadyVerified =
+    (enriched.phone_valid && isTrustedContactSource(enriched.sources.phone?.source)) ||
+    (emailVerified && isTrustedContactSource(enriched.sources.email?.source));
+
+  if (missingFields.length > 0 && !alreadyVerified && (missingFields.includes('phone') || missingFields.includes('email'))) {
+    try {
+      // Only probe the fields that actually unlock "verified": phone, email,
+      // and the website (whose visit is what yields phone/email). Social
+      // handles come from the business's own site, never from extra Bing
+      // probes on the shared results page (which leak cross-company links).
+      const fallbackFields = ['phone', 'email', 'website'].filter((f) => missingFields.includes(f));
+      console.log(`[Enrichment] ${business.name} — Google Search fallback (missing: ${fallbackFields.join(', ')})`);
+      const searchResult = await searchGoogleForBusiness(
+        business.name,
+        business.city || '',
+        business.country || '',
+        fallbackFields
+      );
+
+      if (searchResult.phone && !enriched.phone) {
+        // Sanity-filter before assigning: a bare 12+ digit run with no real
+        // separators is almost always a sliced Facebook/page ID, not a phone.
+        const digitsOnly = searchResult.phone.replace(/\D/g, '');
+        const hasSeperator = /[()\s.-]/.test(searchResult.phone);
+        const withPlus = searchResult.phone.trim().startsWith('+');
+        const localDigits = withPlus ? digitsOnly.slice(1) : digitsOnly;
+        const saneLength =
+          digitsOnly.length <= 15 &&
+          (hasSeperator || digitsOnly.length < 12) &&
+          localDigits.length <= 11 &&
+          !/(\d)\1{4}/.test(digitsOnly);
+        if (saneLength) {
+          enriched.phone = searchResult.phone;
+          enriched.sources.phone = { value: searchResult.phone, source: 'google_search', confidence: 'medium' };
+          // Re-validate the fresh phone so the phone_valid flag tracks it.
+          try {
+            const pv = validatePhone(searchResult.phone, enriched.country_code || undefined);
+            enriched.phone_valid = pv.valid;
+            enriched.phone_country = pv.countryCode || undefined;
+            enriched.phone = pv.formatted || enriched.phone;
+            if (pv.valid) {
+              enriched.sources.phone_valid = { value: 'true', source: 'libphonenumber-js', confidence: 'high' };
+            }
+          } catch {
+            enriched.phone_valid = false;
+          }
+        }
+      }
+      if (searchResult.email && !enriched.email) {
+        enriched.email = searchResult.email;
+        enriched.sources.email = { value: searchResult.email, source: 'google_search', confidence: 'medium' };
+        try {
+          emailVerified = await verifyEmailDomain(searchResult.email);
+        } catch {
+          emailVerified = false;
+        }
+        enriched.sources.email_domain_verified = {
+          value: String(emailVerified),
+          source: 'dns-mx-lookup',
+          confidence: 'medium',
+        };
+      }
+      if (searchResult.website && !enriched.website && isCredibleWebsiteMatch(searchResult.website, business.name)) {
+        enriched.website = searchResult.website;
+        enriched.sources.website = { value: searchResult.website, source: 'google_search', confidence: 'medium' };
+      }
+      if (searchResult.instagram && !enriched.instagram) {
+        enriched.instagram = searchResult.instagram;
+        enriched.sources.instagram = { value: searchResult.instagram, source: 'google_search', confidence: 'medium' };
+      }
+      if (searchResult.facebook && !enriched.facebook) {
+        enriched.facebook = searchResult.facebook;
+        enriched.sources.facebook = { value: searchResult.facebook, source: 'google_search', confidence: 'medium' };
+      }
+      if (searchResult.linkedin && !enriched.linkedin) {
+        enriched.linkedin = searchResult.linkedin;
+        enriched.sources.linkedin = { value: searchResult.linkedin, source: 'google_search', confidence: 'medium' };
+      }
+      console.log(`[Enrichment] ${business.name} — Google Search filled: phone=${enriched.phone || 'none'}, email=${enriched.email || 'none'}, website=${enriched.website || 'none'}, ig=${enriched.instagram || 'none'}, fb=${enriched.facebook || 'none'}, li=${enriched.linkedin || 'none'}`);
+    } catch (error) {
+      console.log(`[Enrichment] ${business.name} — Google Search failed (non-fatal)`);
+      console.error(error);
+    }
+  }
+
+  // Step 1c: if the search fallback found a (credible) website and we didn't
+  // already scrape one, run the full website scraper on it — it is now the
+  // authoritative source for deeper email/socials (and the fast path that
+  // unlocks verified, so it is always worth the one HTTP pass).
+  if (enriched.website && !wasWebsiteScraped && isCredibleWebsiteMatch(enriched.website, business.name)) {
+    try {
+      const scraped = await scrapeWebsite(enriched.website);
+
+      if (scraped.phone && !enriched.phone) {
+        enriched.phone = scraped.phone;
+        enriched.sources.phone = scraped.sources.phone!;
+        if (!enriched.phone_valid) {
+          try {
+            const pv = validatePhone(scraped.phone, enriched.country_code || undefined);
+            enriched.phone_valid = pv.valid;
+            enriched.phone_country = pv.countryCode || undefined;
+            enriched.phone = pv.formatted || enriched.phone;
+            if (pv.valid) {
+              enriched.sources.phone_valid = { value: 'true', source: 'libphonenumber-js', confidence: 'high' };
+            }
+          } catch {
+            enriched.phone_valid = false;
+          }
+        }
+      }
+      if (scraped.email && !enriched.email) {
+        enriched.email = scraped.email;
+        enriched.sources.email = scraped.sources.email!;
+        if (!enriched.sources.email_domain_verified) {
+          try {
+            emailVerified = await verifyEmailDomain(scraped.email);
+          } catch {
+            emailVerified = false;
+          }
+          enriched.sources.email_domain_verified = {
+            value: String(emailVerified),
+            source: 'dns-mx-lookup',
+            confidence: 'medium',
+          };
+        }
+      }
+      if (scraped.instagram && !enriched.instagram) {
+        enriched.instagram = scraped.instagram;
+        enriched.sources.instagram = scraped.sources.instagram!;
+      }
+      if (scraped.facebook && !enriched.facebook) {
+        enriched.facebook = scraped.facebook;
+        enriched.sources.facebook = scraped.sources.facebook!;
+      }
+      if (scraped.linkedin && !enriched.linkedin) {
+        enriched.linkedin = scraped.linkedin;
+        enriched.sources.linkedin = scraped.sources.linkedin!;
+      }
+      if (scraped.contactPerson && !enriched.contact_person) {
+        enriched.contact_person = scraped.contactPerson;
+        enriched.sources.contact_person = scraped.sources.contact_person!;
+      }
+      console.log(`[Enrichment] ${business.name} — website scrape (found via search): email=${enriched.email || 'none'}, ig=${enriched.instagram || 'none'}, fb=${enriched.facebook || 'none'}, li=${enriched.linkedin || 'none'}`);
+    } catch (error) {
+      console.log(`[Enrichment] ${business.name} — website re-scrape failed (non-fatal)`);
+    }
+  }
+
   // Step 3: Calculate confidence score
   const fieldsFound = [
     enriched.phone,
@@ -275,6 +357,12 @@ export async function enrichBusiness(business: DiscoveryBusiness): Promise<Enric
     enriched.confidence = 'low';
   }
 
+  // Non-relevant leads always get low confidence regardless of how many
+  // fields were scraped — they are junk that sneaked in via the SERP.
+  if (!relevant) {
+    enriched.confidence = 'low';
+  }
+
   // A lead counts as "verified" (real, contactable) when it has a valid
   // phone number OR a mail-accepting email domain — this is the gate the
   // orchestrator uses to decide whether a business fills the user's
@@ -282,9 +370,12 @@ export async function enrichBusiness(business: DiscoveryBusiness): Promise<Enric
   // source for THAT business: the Google Maps listing, its own website, or
   // OSM tags — never from the text of a shared search-results page (which
   // mixes many companies and is how wrong-but-verified data leaked in).
+  // Non-relevant engine-sourced leads are NEVER verified even when the
+  // phone/email technically validates (this is the safety-net gate).
   enriched.verified =
-    (enriched.phone_valid && isTrustedContactSource(enriched.sources.phone?.source)) ||
-    (emailVerified && isTrustedContactSource(enriched.sources.email?.source));
+    relevant &&
+    ((enriched.phone_valid && isTrustedContactSource(enriched.sources.phone?.source)) ||
+    (emailVerified && isTrustedContactSource(enriched.sources.email?.source)));
 
   return enriched;
 }

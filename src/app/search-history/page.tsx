@@ -4,6 +4,7 @@ import { useEffect, useState, useCallback } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { BrandLoader } from "@/components/shared/brand-loader";
 import {
   Table,
   TableBody,
@@ -33,6 +34,7 @@ import {
   FileSearch,
   Trash2,
 } from "lucide-react";
+import { getCurrentUser, type AuthUser } from "@/lib/api";
 import type { Search as SearchType } from "@/types";
 import { api } from "@/lib/api";
 
@@ -111,6 +113,13 @@ export default function SearchHistoryPage() {
   const [deleteTarget, setDeleteTarget] = useState<SearchType | null>(null);
   const [deleteAllOpen, setDeleteAllOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [user, setUser] = useState<AuthUser | null>(null);
+
+  useEffect(() => {
+    getCurrentUser().then(setUser);
+  }, []);
+
+  const isAdmin = user?.role === "admin";
 
   const loadSearches = useCallback(async () => {
     try {
@@ -175,8 +184,8 @@ export default function SearchHistoryPage() {
             View and manage all your lead extraction searches.
           </p>
         </div>
-        <div className="flex gap-2">
-          {searches.length > 0 && (
+        <div className="flex flex-wrap gap-2">
+          {searches.length > 0 && isAdmin && (
             <Button variant="destructive" className="gap-2" onClick={() => setDeleteAllOpen(true)}>
               <Trash2 className="h-4 w-4" />
               Delete All
@@ -248,9 +257,7 @@ export default function SearchHistoryPage() {
         </CardHeader>
         <CardContent>
           {isLoading ? (
-            <div className="flex items-center justify-center py-12">
-              <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
-            </div>
+            <BrandLoader label="Loading search history…" className="py-12" />
           ) : searches.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-12 text-center">
               <div className="rounded-full bg-muted p-3 mb-4">
@@ -319,14 +326,16 @@ export default function SearchHistoryPage() {
                                 View
                               </Button>
                             </Link>
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              className="text-destructive hover:text-destructive h-8 w-8 p-0"
-                              onClick={() => setDeleteTarget(search)}
-                            >
-                              <Trash2 className="h-3.5 w-3.5" />
-                            </Button>
+                            {(isAdmin || search.created_by === user?.id) && (
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                className="text-destructive hover:text-destructive h-8 w-8 p-0"
+                                onClick={() => setDeleteTarget(search)}
+                              >
+                                <Trash2 className="h-3.5 w-3.5" />
+                              </Button>
+                            )}
                           </div>
                         </TableCell>
                       </TableRow>
@@ -370,14 +379,16 @@ export default function SearchHistoryPage() {
                             View
                           </Button>
                         </Link>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="text-destructive hover:text-destructive"
-                          onClick={() => setDeleteTarget(search)}
-                        >
-                          <Trash2 className="h-3.5 w-3.5" />
-                        </Button>
+                        {(isAdmin || search.created_by === user?.id) && (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="text-destructive hover:text-destructive"
+                            onClick={() => setDeleteTarget(search)}
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </Button>
+                        )}
                       </div>
                     </div>
                   </div>

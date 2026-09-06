@@ -10,8 +10,9 @@ import {
   type AppResponse,
 } from '../middleware';
 import { config } from '../config';
-import { db, logEvent, nowIso, sql } from '../db';
+import { db, logEvent, nowIso, sql, toSearch } from '../db';
 import { createUser, getUserById, hashPassword, toAppUser } from '../auth';
+import { passwordValidationMessage } from '../password-policy';
 
 export const adminRouter = Router();
 adminRouter.use(requireAdmin);
@@ -41,7 +42,7 @@ function countAdmins(): number {
 adminRouter.get(
   '/users',
   asyncHandler(async (_req: AppRequest, res: AppResponse) => {
-    const rows = db.prepare('SELECT id, username, email, password_changed_at, role, enabled, created_at, updated_at FROM users ORDER BY created_at ASC').all() as Record<string, unknown>[];
+    const rows = db.prepare('SELECT id, username, email, password_changed_at, role, enabled, onboarding_seen, created_at, updated_at FROM users ORDER BY created_at ASC').all() as Record<string, unknown>[];
     res.json({ users: rows.map(toAppUser) });
   })
 );
@@ -63,9 +64,11 @@ adminRouter.post(
     if (!finalUsername) {
       return sendError(res, 400, 'Email is required');
     }
-    if (typeof password !== 'string' || password.length < 8) {
-      return sendError(res, 400, 'Password must be at least 8 characters');
+    if (typeof password !== 'string') {
+      return sendError(res, 400, 'Password is required');
     }
+    const msg = passwordValidationMessage(password);
+    if (msg) return sendError(res, 400, msg);
     const finalRole = role === 'admin' ? 'admin' : 'user';
 
     const exists = db
@@ -148,9 +151,11 @@ adminRouter.post(
     if (!user) return sendError(res, 404, 'User not found');
 
     const { password } = (req.body || {}) as { password?: unknown };
-    if (typeof password !== 'string' || password.length < 8) {
-      return sendError(res, 400, 'Password must be at least 8 characters');
+    if (typeof password !== 'string') {
+      return sendError(res, 400, 'Password is required');
     }
+    const msg = passwordValidationMessage(password);
+    if (msg) return sendError(res, 400, msg);
 
     const hashed = await hashPassword(password);
     const changedAt = nowIso();
@@ -186,6 +191,20 @@ adminRouter.delete(
     db.prepare('DELETE FROM users WHERE id = ?').run(id);
     logEvent('ADMIN', 'info', `Admin "${req.user?.username}" deleted user "${user.username}"`);
     res.json({ success: true, id });
+  })
+);
+
+// GET /api/admin/users/:id/searches — one user's extraction history (admin).
+adminRouter.get(
+  '/users/:id/searches',
+  asyncHandler(async (req: AppRequest, res: AppResponse) => {
+    const id = String(req.params.id || '');
+    const user = getUserById(id);
+    if (!user) return sendError(res, 404, 'User not found');
+    const rows = db
+      .prepare('SELECT * FROM searches WHERE created_by = ? ORDER BY created_at DESC LIMIT 200')
+      .all(id) as Record<string, unknown>[];
+    res.json({ searches: rows.map(toSearch) });
   })
 );
 

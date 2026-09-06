@@ -4,7 +4,7 @@ import { deduplicateBusinesses } from './deduplication';
 import { isIllFormedBusiness } from './discovery/filters';
 import { mapWithConcurrency } from '@/lib/utils/concurrency';
 import { logExtraction } from './logger';
-import { resetBrowserSession, extractionSessionStore } from './browser';
+import { resetBrowserSession, closeSessionContext, extractionSessionStore, setActiveSearchCount } from './browser';
 import { buildCitySchedule } from './multi-city';
 import type { ExtractionStore } from '@/types';
 
@@ -19,14 +19,16 @@ export interface ExtractionParams {
 
 const MAX_ROUNDS = 24;
 const MIN_NEW_VERIFIED_PER_ROUND = 3;
-const ENRICHMENT_CONCURRENCY = 4;
+const ENRICHMENT_CONCURRENCY = 6;
 
 // In-process semaphore: up to N extractions may run at once (N must match
 // MAX_CONCURRENT_SEARCHES — the API-level DB guard). Each extraction gets its
 // OWN Chrome session/profile via extractionSessionStore (see browser.ts), so
-// parallel runs never share cookies and don't flag each other the way two
-// searches on one profile did (the 17:01 + 17:06 Karachi runs).
-const MAX_CONCURRENT = Math.max(1, Number(process.env.MAX_CONCURRENT_SEARCHES || 3));
+// parallel runs never share cookies. BUT a serial setup (1) is what keeps the
+// warm profile in play: only a solo search reuses the warm profile directly,
+// and THAT is what makes country-wide Google Maps deliver a full feed (70+
+// cards) instead of a collapsed 1-4-card cold feed.
+const MAX_CONCURRENT = Math.max(1, Number(process.env.MAX_CONCURRENT_SEARCHES || 1));
 
 // How weak a search must be before its browser profile gets rotated. A
 // persistent profile is what keeps Google Maps serving a returning-visitor
@@ -52,6 +54,12 @@ export async function runExtraction(params: ExtractionParams, store: ExtractionS
         } catch {
           // Best-effort.
         }
+      } else {
+        try {
+          await closeSessionContext();
+        } catch {
+          // Best-effort.
+        }
       }
     });
   } finally {
@@ -65,6 +73,7 @@ const waitingQueue: Array<() => void> = [];
 function acquireSlot(): Promise<void> {
   if (activeExtractions < MAX_CONCURRENT) {
     activeExtractions++;
+    setActiveSearchCount(activeExtractions);
     return Promise.resolve();
   }
   return new Promise<void>((resolve) => waitingQueue.push(resolve));
@@ -76,6 +85,7 @@ function releaseSlot(): void {
     next();
   } else {
     activeExtractions--;
+    setActiveSearchCount(activeExtractions);
   }
 }
 
@@ -172,7 +182,7 @@ async function runExtractionInner(params: ExtractionParams, store: ExtractionSto
           ENRICHMENT_CONCURRENCY,
           async (biz) => {
             try {
-              return await enrichBusiness(biz);
+              return await enrichBusiness(biz, keyword);
             } catch (err) {
               console.error(`[Extraction] Failed to enrich "${biz.name}":`, err);
               return null;
@@ -209,6 +219,12 @@ async function runExtractionInner(params: ExtractionParams, store: ExtractionSto
             const hasContact = !!(biz.phone || biz.email || biz.website);
             if (isIllFormedBusiness(biz.name) || (!hasContact && biz.verified === false)) {
               logExtraction(searchId, `Skipped (garbage/no contact): "${biz.name}"`);
+              continue;
+            }
+            // Irrelevant engine-sourced leads are never persisted — they are
+            // junk that slipped through enrichment (the safety net).
+            if (biz.relevant === false) {
+              logExtraction(searchId, `Skipped (not relevant to "${keyword}"): "${biz.name}"`);
               continue;
             }
 

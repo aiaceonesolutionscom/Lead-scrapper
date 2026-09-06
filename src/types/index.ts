@@ -14,6 +14,43 @@ export interface Search {
   updated_at: string;
 }
 
+/** In-app notification shown in the sidebar bell. */
+export interface AppNotification {
+  id: string;
+  user_id: string;
+  type: 'search' | 'info' | 'warning' | 'announcement';
+  title: string;
+  body: string | null;
+  link: string | null;
+  read: boolean;
+  created_at: string;
+}
+
+/** Support chat thread (user-opened, admin-replied). */
+export interface SupportThread {
+  id: string;
+  user_id: string;
+  subject: string;
+  status: 'open' | 'closed';
+  /** Filled by list endpoints: message count, latest message + author/role. */
+  message_count?: number;
+  last_message?: string | null;
+  last_message_at?: string | null;
+  user_username?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SupportMessage {
+  id: string;
+  thread_id: string;
+  user_id: string;
+  role: 'admin' | 'user';
+  username: string;
+  body: string;
+  created_at: string;
+}
+
 export interface Lead {
   id: string;
   business_name: string;
@@ -94,6 +131,7 @@ export interface EnrichedBusiness extends DiscoveryBusiness {
   contact_person?: string;
   confidence?: string;
   verified?: boolean;
+  relevant?: boolean;
   sources: Record<string, { value: string | null; source: string; confidence: 'high' | 'medium' | 'low' }>;
 }
 
@@ -129,7 +167,9 @@ export interface DashboardStats {
 
 export interface ExportData {
   business_name: string;
+  contact_person: string;
   phone: string;
+  phone_country: string;
   email: string;
   website: string;
   instagram: string;
@@ -141,5 +181,7 @@ export interface ExportData {
   location_url: string;
   category: string;
   confidence: string;
+  verified: string;
+  status: string;
   created_date: string;
 }

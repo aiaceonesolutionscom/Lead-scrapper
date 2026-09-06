@@ -39,8 +39,12 @@ export const config = {
   loginMaxFailuresPerIp: Number(process.env.LOGIN_MAX_FAILURES_PER_IP || 10),
   loginMaxFailuresPerUser: Number(process.env.LOGIN_MAX_FAILURES_PER_USER || 6),
   loginLockWindowMinutes: Number(process.env.LOGIN_LOCK_WINDOW_MINUTES || 15),
+  // Total login requests per IP per minute (success or fail), on top of the
+  // failure-based lockout above. Blocks bots that hammer many request bodies.
+  loginMaxRequestsPerMinute: Number(process.env.LOGIN_MAX_REQUESTS_PER_MIN || 8),
   // Maximum number of extractions running at the same time.
-  // Set to 1 for development to prevent concurrent scraper collisions;
-  // increase for production if desired.
+  // 1 = strictly serial: every search runs solo on the warm profile so Google
+  // Maps still serves the full country-wide feed (parallel runs cold profiles
+  // and collapse the US feed). Changes require a backend restart.
   maxConcurrentSearches: Number(process.env.MAX_CONCURRENT_SEARCHES || 1),
 };

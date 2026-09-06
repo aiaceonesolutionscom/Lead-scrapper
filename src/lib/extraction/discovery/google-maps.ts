@@ -2,6 +2,7 @@ import type { Page } from 'playwright';
 import { withPage } from '../browser';
 import type { DiscoveryBusiness } from '@/types';
 import { normalizeString } from '@/lib/utils';
+import { countryNameToISO2 } from '@/lib/utils/countries';
 
 export interface GoogleMapsOptions {
   headless?: boolean;
@@ -184,6 +185,7 @@ export async function discoverFromGoogleMaps(
       address: c.address,
       city: city || undefined,
       country: country || undefined,
+      country_code: countryNameToISO2(country) || undefined,
       website: c.website,
       phone: c.phone,
       email: c.email,

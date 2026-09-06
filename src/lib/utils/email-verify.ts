@@ -4,6 +4,9 @@ import { promises as dns } from 'dns';
 // businesses from the same city) don't repeat the same DNS lookup.
 const mxCache = new Map<string, boolean>();
 
+// Upper bound for a single MX lookup.
+const DNS_TIMEOUT_MS = 5000;
+
 // Confirms the domain has real mail-exchange (MX) records, i.e. it's a
 // genuine, registered, mail-accepting domain. This is a free, local, no-key
 // check (Node's built-in dns module) — it proves the domain can receive mail,
@@ -13,8 +16,16 @@ export async function domainHasMailServer(domain: string): Promise<boolean> {
   const key = domain.toLowerCase();
   if (mxCache.has(key)) return mxCache.get(key)!;
 
+  // The OS resolver can hang (or reject via unhandled rejection) on an
+  // unresponsive DNS server, freezing or crashing enrichment for that
+  // business. Race the lookup against a timeout so a dead DNS never stalls
+  // or kills the whole extraction.
   try {
-    const records = await dns.resolveMx(key);
+    const lookup = dns.resolveMx(key);
+    const timer = new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error('MX lookup timed out')), DNS_TIMEOUT_MS)
+    );
+    const records = await Promise.race([lookup, timer]);
     const ok = Array.isArray(records) && records.length > 0;
     mxCache.set(key, ok);
     return ok;

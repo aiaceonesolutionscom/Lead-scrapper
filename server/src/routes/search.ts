@@ -10,6 +10,7 @@ import {
 import { config } from '../config';
 import { db, logEvent, nowIso, toLead, toSearch } from '../db';
 import { createExtractionStore } from '../store';
+import { createNotification } from '../notifications';
 
 export const searchRouter = Router();
 
@@ -149,20 +150,23 @@ searchRouter.get(
   })
 );
 
-// DELETE /api/search/:id
+// DELETE /api/search/:id — owner or admin
 searchRouter.delete(
   '/:id',
-  requireAdmin,
   asyncHandler(async (req: AppRequest, res: AppResponse) => {
     const id = String(req.params.id || '');
     if (!id) return sendError(res, 400, 'Search ID is required');
 
-    const exists = db.prepare('SELECT id FROM searches WHERE id = ?').get(id);
-    if (!exists) return sendError(res, 404, 'Search not found');
+    const search = db.prepare('SELECT id, created_by FROM searches WHERE id = ?').get(id) as Record<string, unknown> | undefined;
+    if (!search) return sendError(res, 404, 'Search not found');
+
+    if (req.user?.role !== 'admin' && String(search.created_by ?? '') !== req.user?.id) {
+      return sendError(res, 404, 'Search not found');
+    }
 
     db.prepare('DELETE FROM search_leads WHERE search_id = ?').run(id);
     db.prepare('DELETE FROM searches WHERE id = ?').run(id);
-    logEvent('SEARCH', 'info', `Search ${id} deleted by admin`);
+    logEvent('SEARCH', 'info', `Search ${id} deleted by "${req.user?.username}"`);
     res.json({ success: true, id });
   })
 );
@@ -193,6 +197,8 @@ searchRouter.post(
 
     logEvent('SEARCH', 'info', `Search ${searchId} started: "${keyword}" in ${city || country} (${searchMode}), target ${requestedCount}`);
 
+    const searchOwnerId = req.user?.id ?? null;
+
     // Fire-and-forget: respond first, then run extraction (same process).
     setImmediate(() => {
       void (async () => {
@@ -202,12 +208,33 @@ searchRouter.post(
             { searchId, keyword, country, city, searchMode, requestedCount },
             createExtractionStore()
           );
+          // Notify the owner that their search finished.
+          try {
+            const row = db
+              .prepare('SELECT status, keyword, enriched_count, discovered_count, created_by FROM searches WHERE id = ?')
+              .get(searchId) as
+              | { status: string; keyword: string; enriched_count: number; discovered_count: number; created_by: string | null }
+              | undefined;
+            if (row?.created_by) {
+              const status = row.status;
+              createNotification(
+                row.created_by,
+                status === 'failed' ? 'warning' : 'search',
+                status === 'completed' ? `Search "${row.keyword}" completed` : `Search "${row.keyword}" ${status.replace(/_/g, ' ')}`,
+                `${row.enriched_count} verified leads found (${row.discovered_count} discovered).`,
+                `/search/${searchId}`
+              );
+            }
+          } catch {
+            // notifications are best-effort
+          }
         } catch (err) {
           const msg = err instanceof Error ? err.message : 'Unknown extraction error';
           logEvent('EXTRACTION', 'error', `Extraction failed for ${searchId}: ${msg}`);
           try {
             const store = createExtractionStore();
             await store.updateSearch(searchId, { status: 'failed', error_message: msg });
+            createNotification(searchOwnerId, 'warning', 'Search failed', msg, `/search/${searchId}`);
           } catch {
             // last-resort: nothing more to do
           }
@@ -229,8 +256,8 @@ searchRouter.post(
     }
 
     const existing = db
-      .prepare('SELECT id, status, created_by FROM searches WHERE id = ?')
-      .get(searchId) as { id: string; status: string; created_by: string | null } | undefined;
+      .prepare('SELECT id, keyword, status, created_by FROM searches WHERE id = ?')
+      .get(searchId) as { id: string; keyword: string; status: string; created_by: string | null } | undefined;
     if (!existing) return sendError(res, 404, 'Search not found');
 
     if (req.user?.role !== 'admin' && existing.created_by !== req.user?.id) {
@@ -245,6 +272,7 @@ searchRouter.post(
       nowIso(),
       searchId
     );
+    createNotification(existing.created_by, 'warning', `Search "${existing.keyword}" cancelled`, 'The running search was stopped.', `/search/${searchId}`);
     logEvent('SEARCH', 'info', `Search ${searchId} cancelled`);
     res.json({ success: true, searchId });
   })

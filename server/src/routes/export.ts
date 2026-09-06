@@ -8,21 +8,40 @@ import type { ExportData, Lead } from '@/types';
 
 export const exportRouter = Router();
 
+function statusLabel(s: string | undefined): string {
+  switch (String(s)) {
+    case 'contacted': return 'Contacted';
+    case 'interested': return 'Interested';
+    case 'follow_up': return 'Follow-Up';
+    case 'converted': return 'Converted';
+    case 'archived': return 'Archived';
+    default: return 'New';
+  }
+}
+
+// Every field belongs in its own column. Missing values become "N/A" instead
+// of empty cells, so nothing looks missing and each row is easy to scan.
 function mapLeadToExport(lead: Lead): ExportData {
+  const fmt = (v: string | null | undefined) => (v && v.trim() ? String(v).trim() : 'N/A');
+
   return {
-    business_name: lead.business_name,
-    phone: lead.phone || '',
-    email: lead.email || '',
-    website: lead.website || '',
-    instagram: lead.instagram || '',
-    facebook: lead.facebook || '',
-    linkedin: lead.linkedin || '',
-    address: lead.address || '',
-    city: lead.city || '',
-    country: lead.country || '',
-    location_url: getMapUrl(lead) || '',
-    category: lead.category || '',
-    confidence: lead.confidence || '',
+    business_name: fmt(lead.business_name),
+    contact_person: fmt(lead.contact_person),
+    phone: fmt(lead.phone),
+    phone_country: fmt(lead.phone_country),
+    email: fmt(lead.email),
+    website: fmt(lead.website),
+    instagram: fmt(lead.instagram),
+    facebook: fmt(lead.facebook),
+    linkedin: fmt(lead.linkedin),
+    address: fmt(lead.address),
+    city: fmt(lead.city),
+    country: fmt(lead.country),
+    location_url: getMapUrl(lead) || 'N/A',
+    category: fmt(lead.category),
+    confidence: fmt(lead.confidence).replace(/^./, (c) => c.toUpperCase()),
+    verified: lead.verified ? 'Yes' : 'No',
+    status: statusLabel(lead.status),
     created_date: new Date(lead.created_at).toLocaleDateString(),
   };
 }
@@ -30,21 +49,22 @@ function mapLeadToExport(lead: Lead): ExportData {
 const HYPERLINK = (url: string, label: string) =>
   `=HYPERLINK("${url.replace(/"/g, '""')}","${label.replace(/"/g, '""')}")`;
 
-const MAP_LABEL = 'View on Map';
+// URL-ish columns become clickable Excel links in CSV. Only applied to real
+// values — "N/A" markers stay plain text.
+function maybeLink(value: string, url: string): string {
+  if (value === 'N/A') return value;
+  return HYPERLINK(url, value);
+}
 
 function toClickableCsvRow(row: ExportData): Record<string, unknown> {
   const out: Record<string, unknown> = { ...row };
-  if (row.phone) out.phone = HYPERLINK(`tel:${row.phone}`, row.phone);
-  if (row.email) out.email = HYPERLINK(`mailto:${row.email}`, row.email);
-  if (row.website) out.website = HYPERLINK(row.website, row.website);
-  if (row.instagram) out.instagram = HYPERLINK(row.instagram, row.instagram);
-  if (row.facebook) out.facebook = HYPERLINK(row.facebook, row.facebook);
-  if (row.linkedin) out.linkedin = HYPERLINK(row.linkedin, row.linkedin);
-  if (row.location_url) {
-    out.address = HYPERLINK(row.location_url, MAP_LABEL);
-    out.city = HYPERLINK(row.location_url, MAP_LABEL);
-    out.location_url = HYPERLINK(row.location_url, row.location_url);
-  }
+  if (row.phone !== 'N/A') out.phone = maybeLink(row.phone, `tel:${row.phone.replace(/[\s-]/g, '')}`);
+  if (row.email !== 'N/A') out.email = maybeLink(row.email, `mailto:${row.email}`);
+  if (row.website !== 'N/A') out.website = maybeLink(row.website, row.website);
+  if (row.instagram !== 'N/A') out.instagram = maybeLink(row.instagram, row.instagram);
+  if (row.facebook !== 'N/A') out.facebook = maybeLink(row.facebook, row.facebook);
+  if (row.linkedin !== 'N/A') out.linkedin = maybeLink(row.linkedin, row.linkedin);
+  if (row.location_url !== 'N/A') out.location_url = HYPERLINK(row.location_url, row.location_url);
   return out;
 }
 
@@ -116,36 +136,53 @@ exportRouter.post(
       return res.send(BOM + csv);
     }
 
-    // XLSX with real, clickable hyperlinks
+    // XLSX with real, clickable hyperlinks + readability features:
+    // frozen header, auto-filter, and highlighted "Verified" / status values.
     const worksheet = XLSX.utils.json_to_sheet(exportData);
+
+    const keys = Object.keys(exportData[0] || {}) as (keyof ExportData)[];
+
     const link = (addr: string, target: string, tooltip: string) => {
       const cell = worksheet[addr];
       if (!cell) return;
       cell.l = { Target: target, Tooltip: tooltip };
       cell.s = { font: { color: { rgb: '0563C1' }, underline: true } };
     };
+
     exportData.forEach((row, i) => {
-      const r = i + 2;
-      if (row.phone) link(`B${r}`, `tel:${row.phone}`, `Call ${row.phone}`);
-      if (row.email) link(`C${r}`, `mailto:${row.email}`, `Email ${row.email}`);
-      if (row.website) link(`D${r}`, row.website, row.website);
-      if (row.instagram) link(`E${r}`, row.instagram, row.instagram);
-      if (row.facebook) link(`F${r}`, row.facebook, row.facebook);
-      if (row.linkedin) link(`G${r}`, row.linkedin, row.linkedin);
-      if (row.location_url) {
-        link(`H${r}`, row.location_url, 'Open location in Google Maps');
-        link(`I${r}`, row.location_url, 'Open location in Google Maps');
-        link(`K${r}`, row.location_url, 'Open location in Google Maps');
+      const col = (k: keyof ExportData) => keys.indexOf(k) + 1;
+      if (row.phone !== 'N/A') link(XLSX.utils.encode_cell({ r: i + 1, c: col('phone') - 1 }), `tel:${row.phone.replace(/[\s-]/g, '')}`, 'Call');
+      if (row.email !== 'N/A') link(XLSX.utils.encode_cell({ r: i + 1, c: col('email') - 1 }), `mailto:${row.email}`, 'Email');
+      if (row.website !== 'N/A') link(XLSX.utils.encode_cell({ r: i + 1, c: col('website') - 1 }), row.website, row.website);
+      if (row.instagram !== 'N/A') link(XLSX.utils.encode_cell({ r: i + 1, c: col('instagram') - 1 }), row.instagram, row.instagram);
+      if (row.facebook !== 'N/A') link(XLSX.utils.encode_cell({ r: i + 1, c: col('facebook') - 1 }), row.facebook, row.facebook);
+      if (row.linkedin !== 'N/A') link(XLSX.utils.encode_cell({ r: i + 1, c: col('linkedin') - 1 }), row.linkedin, row.linkedin);
+      if (row.location_url !== 'N/A') link(XLSX.utils.encode_cell({ r: i + 1, c: col('location_url') - 1 }), row.location_url, 'Open in Google Maps');
+
+      // Color-coded verified / status cells for at-a-glance reading.
+      const addr = worksheet[XLSX.utils.encode_cell({ r: i + 1, c: col('verified') - 1 })];
+      if (addr) {
+        addr.s = { font: { color: { rgb: row.verified === 'Yes' ? '15803D' : '9CA3AF' }, bold: true } };
+      }
+      const stAddr = worksheet[XLSX.utils.encode_cell({ r: i + 1, c: col('status') - 1 })];
+      if (stAddr) {
+        stAddr.s = { font: { color: { rgb: '374151' }, bold: true } };
       }
     });
 
-    const colWidths = Object.keys(exportData[0] || {}).map((key) => ({
+    // Auto-size columns, but cap width so long URLs don't blow out the sheet.
+    const colWidths = keys.map((key) => ({
       wch: Math.max(
-        key.length,
-        ...exportData.map((row) => String((row as unknown as Record<string, unknown>)[key] || '').length)
+        key.length + 2,
+        Math.min(
+          45,
+          ...exportData.map((row) => String((row as unknown as Record<string, unknown>)[key] || '').length)
+        )
       ),
     }));
     worksheet['!cols'] = colWidths;
+    worksheet['!autofilter'] = { ref: `A1:${XLSX.utils.encode_cell({ r: exportData.length, c: keys.length - 1 })}` };
+    worksheet['!freeze'] = { xSplit: 0, ySplit: 1 };
 
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, worksheet, 'Leads');

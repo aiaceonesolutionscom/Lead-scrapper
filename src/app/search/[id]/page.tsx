@@ -38,7 +38,8 @@ import {
   Bell,
 } from "lucide-react";
 import { getMapUrl } from "@/lib/utils";
-import { api, downloadPost } from "@/lib/api";
+import { BrandLoader } from "@/components/shared/brand-loader";
+import { api, downloadPost, getCurrentUser, type AuthUser } from "@/lib/api";
 import {
   isAlarmMuted,
   kickAudioIfNeeded,
@@ -127,6 +128,7 @@ export default function SearchResultsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [cancelling, setCancelling] = useState(false);
+  const [user, setUser] = useState<AuthUser | null>(null);
   const [logs, setLogs] = useState<string[]>([]);
   const logsEndRef = useRef<HTMLDivElement>(null);
   const prevStatusRef = useRef<string | null>(null);
@@ -135,12 +137,20 @@ export default function SearchResultsPage() {
   const alarmEnabledRef = useRef(alarmEnabled);
   const alarmArmedRef = useRef(false);
 
+  useEffect(() => {
+    getCurrentUser().then(setUser);
+  }, []);
+
+  const isAdmin = user?.role === "admin";
+
   const fetchLogs = useCallback(async () => {
+    // Live logs are admin-only; normal users are skipped (server also 401s).
+    if (!isAdmin) return;
     try {
       const data = await api.get<{ logs: string[] }>("/logs", { search_id: searchId, tail: 30 });
       setLogs(data.logs || []);
     } catch { /* non-critical */ }
-  }, [searchId]);
+  }, [searchId, isAdmin]);
 
   const fetchSearchData = useCallback(async () => {
     try {
@@ -254,10 +264,7 @@ export default function SearchResultsPage() {
 
   if (loading) {
     return (
-      <div className="flex flex-col items-center justify-center gap-4 py-24">
-        <Loader2 className="h-10 w-10 animate-spin text-muted-foreground" />
-        <p className="text-muted-foreground text-sm">Loading search...</p>
-      </div>
+      <BrandLoader label="Loading search…" className="py-24" />
     );
   }
 
@@ -430,8 +437,8 @@ export default function SearchResultsPage() {
         </Card>
       )}
 
-      {/* Logs Section */}
-      {(running || logs.length > 0) && (
+      {/* Logs Section — admin only */}
+      {isAdmin && (running || logs.length > 0) && (
         <Card>
           <CardHeader className="pb-2">
             <CardTitle className="text-base flex items-center gap-2">
@@ -641,7 +648,7 @@ export default function SearchResultsPage() {
                         >
                           {lead.business_name}
                         </Link>
-                        <div className="flex shrink-0 gap-1">
+                        <div className="flex shrink-0 flex-wrap justify-end gap-1">
                           {lead.verified ? (
                             <Badge variant="success" className="text-xs">Verified</Badge>
                           ) : (
