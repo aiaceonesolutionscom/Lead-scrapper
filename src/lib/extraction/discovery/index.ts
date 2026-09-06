@@ -4,6 +4,7 @@ import { discoverFromOSM } from './osm';
 import { discoverFromWebSearch } from './web-search';
 import { discoverFromBing } from './bing-search';
 import { isIllFormedBusiness } from './filters';
+import { resetBrowserSession } from '../browser';
 import { normalizeString, extractDomain } from '@/lib/utils';
 
 function sleep(ms: number): Promise<void> {
@@ -72,17 +73,56 @@ export async function discoverBusinesses(
   // Source 0: Google Maps (Playwright) — PRIMARY source. Real business
   // listings with phone/email/website/address/social for any keyword or
   // arbitrary location. Read via a normal headless browser; no stealth.
+  //
+  // Right now Google Maps is throttled for country-wide queries ("salt
+  // dealers in United States" -> 0 cards while metro queries still return
+  // 15-99). A flagged/cold session quietly returns an empty or 1-4 card feed
+  // instead of the 50-100 the historical best runs got. So: if the first
+  // attempt comes back nearly empty, rotate the browser session (fresh
+  // profile) and retry Google Maps ONCE before falling back to the web
+  // engines — that single retry is what recovers the metro-sized feed.
+  const GM_MIN_ACCEPTABLE = 5;
+  let gmResults: DiscoveryBusiness[] = [];
   try {
     console.log('[Discovery] Querying Google Maps (Playwright)...');
-    const gmResults = await discoverFromGoogleMaps(keyword, city || '', country, limit, {
+    gmResults = await discoverFromGoogleMaps(keyword, city || '', country, limit, {
       headless: true,
       fetchDetails: true,
     });
     console.log(`[Discovery] Google Maps returned ${gmResults.length} results`);
+
+    if (gmResults.length < GM_MIN_ACCEPTABLE) {
+      console.log(`[Discovery] Google Maps feed too thin (${gmResults.length} < ${GM_MIN_ACCEPTABLE}), rotating session and retrying...`);
+      await resetBrowserSession();
+      try {
+        const retried = await discoverFromGoogleMaps(keyword, city || '', country, limit, {
+          headless: true,
+          fetchDetails: true,
+        });
+        console.log(`[Discovery] Google Maps retry returned ${retried.length} results`);
+        if (retried.length > gmResults.length) gmResults = retried;
+      } catch {
+        console.log('[Discovery] Google Maps retry failed (keeping original results)');
+      }
+    }
     allBusinesses.push(...gmResults);
   } catch (error) {
     console.log('[Discovery] Google Maps source failed (continuing with other sources)');
     console.error(error);
+    // The first call usually only throws on a hard block. One retry with a
+    // fresh session can clear a transient consent/flag wall.
+    try {
+      console.log('[Discovery] Google Maps failed, rotating session and retrying once...');
+      await resetBrowserSession();
+      const retried = await discoverFromGoogleMaps(keyword, city || '', country, limit, {
+        headless: true,
+        fetchDetails: true,
+      });
+      console.log(`[Discovery] Google Maps retry returned ${retried.length} results`);
+      allBusinesses.push(...retried);
+    } catch {
+      console.log('[Discovery] Google Maps retry also failed');
+    }
   }
 
   await sleep(1500);

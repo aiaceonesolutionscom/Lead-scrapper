@@ -35,6 +35,7 @@ function parseRating(line: string): { rating?: number; reviews?: number } {
 // Google Maps feed chrome that is NOT a business card — skip these.
 const FEED_CHROME: RegExp[] = [
   /^(hours|all filters|results|saved|recents|get app|share)\b/i,
+  /^price\s+rating\s+hours\s+all\s+filters/i,
   /^some of these/i,
   /^prices come from/i,
   /^all vacation rental/i,
@@ -88,9 +89,26 @@ export async function discoverFromGoogleMaps(
       timeout: 45000,
     });
 
+    // Consent/cookie dialogs can cover the page and starve the feed. Click
+    // "Accept all" / "Reject all" style buttons when one is present.
+    {
+      const consentButton = page
+        .locator('button:has-text("Accept all"), button:has-text("Reject all"), button:has-text("Agree"), button[aria-label*="Accept"]')
+        .first();
+      if ((await consentButton.count().catch(() => 0)) > 0) {
+        try {
+          await consentButton.click({ timeout: 2000 }).catch(() => {});
+          await page.waitForTimeout(800);
+        } catch {
+          // Non-fatal
+        }
+      }
+    }
+
     // Wait for the results feed to appear (Google Maps lazy-renders it).
+    // Country-wide queries render slower than metros; be patient.
     let feedReady = false;
-    for (let w = 0; w < 20 && !feedReady; w++) {
+    for (let w = 0; w < 45 && !feedReady; w++) {
       await page.waitForTimeout(700);
       feedReady = (await page.locator('[role="feed"] > div').count().catch(() => 0)) > 0;
     }
@@ -98,7 +116,8 @@ export async function discoverFromGoogleMaps(
       throw new Error('Google Maps results feed did not load');
     }
 
-    // Scroll the results feed to force lazy-loading of more cards.
+    // Scroll the results feed to force lazy-loading of more cards. Country
+    // feeds need more scrolls to reach their full card count (50-100+).
     for (let s = 0; s < maxScrolls; s++) {
       const feed = page.locator('[role="feed"]').first();
       if (await feed.count().catch(() => 0)) {
@@ -111,6 +130,30 @@ export async function discoverFromGoogleMaps(
       await randomDelay(500, 900);
       await collectCards(page, cards);
       if (cards.size >= limit * 2) break;
+    }
+
+    // If we ran out of scrolls and still haven't collected the full quota,
+    // jump to the end of the virtualized feed once — Google Maps renders the
+    // remaining cards when you seek far ahead, then we scroll back through.
+    if (cards.size < limit) {
+      try {
+        const feed = page.locator('[role="feed"]').first();
+        if (await feed.count().catch(() => 0)) {
+          await feed.evaluate((el) => {
+            (el as HTMLElement).scrollBy(0, 100000);
+          }).catch(() => {});
+          await randomDelay(1200, 1800);
+          for (let s2 = 0; s2 < maxScrolls / 2 && cards.size < limit; s2++) {
+            await feed.evaluate((el) => {
+              (el as HTMLElement).scrollBy(0, -1800);
+            }).catch(() => {});
+            await randomDelay(500, 800);
+            await collectCards(page, cards);
+          }
+        }
+      } catch {
+        // Best-effort second scroll pass.
+      }
     }
 
     await collectCards(page, cards);

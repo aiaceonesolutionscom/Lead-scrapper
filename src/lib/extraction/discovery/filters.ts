@@ -52,6 +52,7 @@ const HAS_EMOJI_RE = /[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u;
 // businesses. These leak in via the feed's per-card innerText and must never
 // be treated as a business name.
 const MAPS_CHROME_NAME_PATTERNS = [
+  /^price\s*rating\s*hours\s*all\s*filters\b/i,
   /^rating\s*hours\s*all\s*filters\b/i,
   /^you'?ve reached the end of the list\.?$/i,
   /^get the most out of google maps\.?$/i,

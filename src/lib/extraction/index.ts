@@ -4,6 +4,7 @@ import { deduplicateBusinesses } from './deduplication';
 import { isIllFormedBusiness } from './discovery/filters';
 import { mapWithConcurrency } from '@/lib/utils/concurrency';
 import { logExtraction } from './logger';
+import { resetBrowserSession, extractionSessionStore } from './browser';
 import { buildCitySchedule } from './multi-city';
 import type { ExtractionStore } from '@/types';
 
@@ -20,7 +21,65 @@ const MAX_ROUNDS = 24;
 const MIN_NEW_VERIFIED_PER_ROUND = 3;
 const ENRICHMENT_CONCURRENCY = 4;
 
+// In-process semaphore: up to N extractions may run at once (N must match
+// MAX_CONCURRENT_SEARCHES — the API-level DB guard). Each extraction gets its
+// OWN Chrome session/profile via extractionSessionStore (see browser.ts), so
+// parallel runs never share cookies and don't flag each other the way two
+// searches on one profile did (the 17:01 + 17:06 Karachi runs).
+const MAX_CONCURRENT = Math.max(1, Number(process.env.MAX_CONCURRENT_SEARCHES || 3));
+
+// How weak a search must be before its browser profile gets rotated. A
+// persistent profile is what keeps Google Maps serving a returning-visitor
+// feed; wiping it after a healthy search throws away that trust. Only a
+// throttled run (tiny discovery) justifies rotating.
+const MIN_DISCOVERED_TO_KEEP_PROFILE = 10;
+
 export async function runExtraction(params: ExtractionParams, store: ExtractionStore): Promise<void> {
+  await acquireSlot();
+  try {
+    // Run the whole search inside its own AsyncLocalStorage scope so every
+    // withPage/resetBrowserSession call resolves to this search's Chrome
+    // profile (concurrent searches each get their own).
+    await extractionSessionStore.run(params.searchId, async () => {
+      const discovered = await runExtractionInner(params, store);
+      // In this search's own session scope: a weak run rotates (discards) the
+      // profile so the NEXT search starts fresh instead of inheriting a
+      // possibly-flagged one; a healthy run keeps its cookies so it stays a
+      // "returning visitor" for the next search.
+      if (discovered >= 0 && discovered < MIN_DISCOVERED_TO_KEEP_PROFILE) {
+        try {
+          await resetBrowserSession();
+        } catch {
+          // Best-effort.
+        }
+      }
+    });
+  } finally {
+    releaseSlot();
+  }
+}
+
+let activeExtractions = 0;
+const waitingQueue: Array<() => void> = [];
+
+function acquireSlot(): Promise<void> {
+  if (activeExtractions < MAX_CONCURRENT) {
+    activeExtractions++;
+    return Promise.resolve();
+  }
+  return new Promise<void>((resolve) => waitingQueue.push(resolve));
+}
+
+function releaseSlot(): void {
+  const next = waitingQueue.shift();
+  if (next) {
+    next();
+  } else {
+    activeExtractions--;
+  }
+}
+
+async function runExtractionInner(params: ExtractionParams, store: ExtractionStore): Promise<void> {
   const { searchId, keyword, country, city, searchMode, requestedCount } = params;
 
   // Ordered sweep of locations: city searches stay in the one chosen city;
@@ -81,6 +140,15 @@ export async function runExtraction(params: ExtractionParams, store: ExtractionS
       totalDiscovered += freshBusinesses.length;
       await store.updateSearch(searchId, { discovered_count: totalDiscovered });
       logExtraction(searchId, `Round ${locIdx + 1}: Discovered ${freshBusinesses.length} new businesses in ${place} (${totalDiscovered} total)`);
+
+      // A flagged Chrome session quietly returns a thin feed (a handful of
+      // results instead of 50-100). If a round finds almost nothing, rotate
+      // the browser session so the NEXT location starts with a fresh profile
+      // instead of compounding the throttling.
+      if (locIdx > 0 && freshBusinesses.length < 5) {
+        logExtraction(searchId, `Round ${locIdx + 1}: thin discovery (${freshBusinesses.length}), rotating browser session`);
+        await resetBrowserSession();
+      }
 
       if (await isCancelled()) {
         stopReason = 'Cancelled by user';
@@ -195,6 +263,7 @@ export async function runExtraction(params: ExtractionParams, store: ExtractionS
       error_message: finalStatus === 'completed' ? null : stopReason,
     });
     logExtraction(searchId, `Extraction complete: status=${finalStatus}, verified=${persistedCount}/${requestedCount}, discovered=${totalDiscovered}`);
+    return totalDiscovered;
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Unknown extraction error';
     logExtraction(searchId, `Extraction failed: ${msg}`, 'error');

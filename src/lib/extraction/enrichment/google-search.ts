@@ -161,6 +161,26 @@ const SKIP_DOMAINS = [
   'webmd.com', 'healthline.com', 'nhs.uk', 'mayoclinic.org', 'medicinenet.com',
 ];
 
+// Bing now wraps organic result links in a click-tracking redirect:
+// https://www.bing.com/ck/a?...&u=a1<base64url-of-real-url>&ntb=1
+// Without unwrapping this, every result's hostname is "bing.com" and
+// isGoodWebsite() rejects 100% of them. Decode the real destination when
+// present; otherwise return the href unchanged (never throws).
+function unwrapBingRedirect(href: string): string {
+  try {
+    const u = new URL(href);
+    if (!/(^|\.)bing\.com$/.test(u.hostname) || u.pathname !== '/ck/a') return href;
+    const encoded = u.searchParams.get('u');
+    if (!encoded) return href;
+    const stripped = encoded.startsWith('a1') ? encoded.slice(2) : encoded;
+    const padded = stripped + '='.repeat((4 - (stripped.length % 4)) % 4);
+    const decoded = Buffer.from(padded, 'base64url').toString('utf-8');
+    return decoded.startsWith('http') ? decoded : href;
+  } catch {
+    return href;
+  }
+}
+
 function isGoodWebsite(url: string): boolean {
   try {
     const u = new URL(url);
@@ -228,11 +248,12 @@ export async function searchGoogleForBusiness(
         await page.waitForTimeout(1400);
 
         if (field === 'website') {
-          const links = (await page.evaluate(() => {
+          const rawLinks = (await page.evaluate(() => {
             return Array.from(document.querySelectorAll('li.b_algo h2 a[href^="http"]'))
               .map((a) => (a as HTMLAnchorElement).href)
               .filter(Boolean);
           }).catch(() => [] as string[])) as string[];
+          const links = rawLinks.map(unwrapBingRedirect);
           for (const href of links) {
             if (isGoodWebsite(href)) {
               result.website = href;
@@ -243,11 +264,13 @@ export async function searchGoogleForBusiness(
             }
           }
           if (!result.website) {
-            const fallback = (await page.evaluate(() => {
+            const rawFallback = (await page.evaluate(() => {
               return Array.from(document.querySelectorAll('a[href^="http"]'))
-                .map((a) => (a as HTMLAnchorElement).href)
-                .filter((h) => !/bing\.com|microsoft|msn/i.test(h));
+                .map((a) => (a as HTMLAnchorElement).href);
             }).catch(() => [] as string[])) as string[];
+            const fallback = rawFallback
+              .map(unwrapBingRedirect)
+              .filter((h) => !/bing\.com|microsoft|msn/i.test(h));
             for (const href of fallback) {
               if (isGoodWebsite(href)) {
                 result.website = href;
