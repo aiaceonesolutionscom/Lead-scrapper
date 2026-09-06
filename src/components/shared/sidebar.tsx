@@ -21,7 +21,6 @@ import {
   LifeBuoy,
 } from "lucide-react";
 import { ThemeToggle } from "@/components/shared/theme-toggle";
-import { NotificationsBell } from "@/components/shared/notifications-bell";
 
 const userNav = [
   { href: "/", label: "Dashboard", icon: LayoutDashboard },
@@ -89,7 +88,6 @@ export function Sidebar({ user }: { user?: AuthUser | null }) {
             <span className="font-semibold text-sm">Lead Extractor</span>
           </Link>
           <div className="flex items-center gap-1">
-            <NotificationsBell />
             <button
               onClick={() => setMobileOpen(false)}
               className="rounded-md p-1 hover:bg-muted md:hidden"

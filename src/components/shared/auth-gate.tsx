@@ -8,6 +8,7 @@ import { getCurrentUser, type AuthUser } from "@/lib/api";
 import { installErrorReporter } from "@/lib/error-report";
 import { Sidebar } from "@/components/shared/sidebar";
 import { ThemeToggle } from "@/components/shared/theme-toggle";
+import { NotificationsBell } from "@/components/shared/notifications-bell";
 import { BrandLoader } from "@/components/shared/brand-loader";
 import { OnboardingModal } from "@/components/shared/onboarding-modal";
 import { markOnboardingSeen } from "@/lib/api";
@@ -83,6 +84,14 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
   return (
     <div className="flex h-full">
       <Sidebar user={user} />
+      {/* Notifications bell lives outside the sidebar so it is never clipped by
+          the narrow sidebar column on mobile or laptop. Anchored to the top-right
+          of the viewport. */}
+      {user && (
+        <div className="fixed right-3 top-3 z-[60] md:right-4 md:top-3">
+          <NotificationsBell />
+        </div>
+      )}
       <main className="flex-1 overflow-auto">
         <div className="pt-16 px-4 pb-4 md:p-6 lg:p-8">
           <div className="md:hidden flex items-center justify-between gap-2 py-1">
