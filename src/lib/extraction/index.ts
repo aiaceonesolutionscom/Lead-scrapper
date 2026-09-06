@@ -79,7 +79,7 @@ function releaseSlot(): void {
   }
 }
 
-async function runExtractionInner(params: ExtractionParams, store: ExtractionStore): Promise<void> {
+async function runExtractionInner(params: ExtractionParams, store: ExtractionStore): Promise<number> {
   const { searchId, keyword, country, city, searchMode, requestedCount } = params;
 
   // Ordered sweep of locations: city searches stay in the one chosen city;
