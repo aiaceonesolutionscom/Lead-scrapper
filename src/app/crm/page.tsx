@@ -77,7 +77,7 @@ export default function CRMPage() {
   const [leadToDelete, setLeadToDelete] = useState<string | null>(null);
   const [deleteAllOpen, setDeleteAllOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
-  const [exportFormat, setExportFormat] = useState<"csv" | "xlsx">("csv");
+  const [exportFormat, setExportFormat] = useState<"csv" | "xlsx" | "pdf">("csv");
   const [exporting, setExporting] = useState(false);
   const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
 
@@ -261,13 +261,22 @@ export default function CRMPage() {
               ? `Showing leads from: "${activeSearch.keyword}" (${activeSearch.city || activeSearch.country}) — ${formatDateShort(activeSearch.created_at)}`
               : "Select a search above to view its leads."}
           </p>
+          {activeSearch && (
+            <span className={`mt-1 inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[11px] font-medium ${activeSearch.search_mode === "city" ? "bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300" : "bg-violet-100 text-violet-700 dark:bg-violet-900/40 dark:text-violet-300"}`}>
+              <MapPin className="h-3 w-3" />
+              {activeSearch.search_mode === "city"
+                ? `Specific Search · ${activeSearch.city}`
+                : `All Search · ${activeSearch.country}`}
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-2 flex-wrap">
-          <Select value={exportFormat} onValueChange={(v) => setExportFormat(v as "csv" | "xlsx")}>
+          <Select value={exportFormat} onValueChange={(v) => setExportFormat(v as "csv" | "xlsx" | "pdf")}>
             <SelectTrigger className="w-[100px] h-9"><SelectValue /></SelectTrigger>
             <SelectContent>
               <SelectItem value="csv">CSV</SelectItem>
               <SelectItem value="xlsx">XLSX</SelectItem>
+              <SelectItem value="pdf">PDF</SelectItem>
             </SelectContent>
           </Select>
           <Button variant="outline" size="sm" className="gap-2" disabled={selectedIds.size === 0 || exporting} onClick={() => handleExport("selected")}>
@@ -394,7 +403,7 @@ export default function CRMPage() {
                           <TableHead>Email</TableHead>
                           <TableHead className="hidden lg:table-cell">Website</TableHead>
                           <TableHead className="hidden lg:table-cell">Socials</TableHead>
-                          <TableHead className="hidden lg:table-cell">City</TableHead>
+                          <TableHead>City</TableHead>
                           <TableHead className="text-right">Actions</TableHead>
                         </TableRow>
                       </TableHeader>
@@ -454,7 +463,7 @@ export default function CRMPage() {
                                   )}
                                 </div>
                               </TableCell>
-                              <TableCell className="hidden lg:table-cell text-sm">
+                              <TableCell className="text-sm">
                                 {(() => {
                                   const mapUrl = lead.city ? getMapUrl(lead) : null;
                                   return mapUrl ? (

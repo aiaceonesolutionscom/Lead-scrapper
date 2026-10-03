@@ -5,10 +5,10 @@ import { config as loadEnv } from 'dotenv';
 
 const here = dirname(fileURLToPath(import.meta.url)); // server/src
 export const serverRoot = resolve(here, '..'); // server/
-export const repoRoot = resolve(serverRoot, '..'); // repository root (D:\...\lead-extractor-crm)
+export const repoRoot = resolve(serverRoot, '..'); // repository root, derived from this file's location so the project can live anywhere
 
 // Load the repository's env file so existing variables (e.g.
-// PLAYWRIGHT_BROWSERS_PATH) keep working — env is loaded from the repo root
+// PLAYWRIGHT_BROWSERS_PATH) keep working â€” env is loaded from the repo root
 // regardless of where the process was started from.
 const envFile = resolve(repoRoot, '.env.local');
 if (existsSync(envFile)) loadEnv({ path: envFile });
@@ -31,7 +31,7 @@ export const config = {
   sessionCookieName: process.env.SESSION_COOKIE_NAME || 'sid',
   sessionTtlHours: Number(process.env.SESSION_TTL_HOURS || 24),
   sessionCleanupMinutes: Number(process.env.SESSION_CLEANUP_MINUTES || 60),
-  // Bootstrap-admin fallback — only used when no users exist yet.
+  // Bootstrap-admin fallback â€” only used when no users exist yet.
   adminUsername: process.env.ADMIN_USERNAME || '',
   adminPassword: process.env.ADMIN_PASSWORD || '',
   logRetentionDays: Number(process.env.LOG_RETENTION_DAYS || 30),
@@ -42,6 +42,10 @@ export const config = {
   // Total login requests per IP per minute (success or fail), on top of the
   // failure-based lockout above. Blocks bots that hammer many request bodies.
   loginMaxRequestsPerMinute: Number(process.env.LOGIN_MAX_REQUESTS_PER_MIN || 8),
+  // Cloudflare Turnstile (free CAPTCHA). Empty = verification disabled, which
+  // keeps local dev / first bootstrap working until site keys are configured.
+  turnstileSecretKey: process.env.TURNSTILE_SECRET_KEY || '',
+  turnstileSiteKey: process.env.NEXT_PUBLIC_TURNSTILE_SITE_KEY || '',
   // Maximum number of extractions running at the same time.
   // 1 = strictly serial: every search runs solo on the warm profile so Google
   // Maps still serves the full country-wide feed (parallel runs cold profiles

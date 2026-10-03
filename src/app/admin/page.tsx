@@ -10,6 +10,7 @@ import { Badge } from "@/components/ui/badge";
 import { PasswordInput } from "@/components/ui/password-input";
 import { SupportAdmin } from "@/components/admin/support-admin";
 import { api } from "@/lib/api";
+import { cn } from "@/lib/utils";
 import type { Search } from "@/types";
 import {
   AlertCircle,
@@ -24,8 +25,20 @@ import {
   Copy,
   KeyRound,
   FileDown,
+  Circle,
 } from "lucide-react";
 import { buildAdminReport } from "@/lib/report";
+
+const ONLINE_WINDOW_MS = 2 * 60 * 1000; // shown as "online" when last active ≤ 2 min
+
+function onlineStatus(lastSeenAt: string | null | undefined): { online: boolean; label: string } {
+  if (!lastSeenAt) return { online: false, label: "Never seen" };
+  const ms = Date.now() - new Date(lastSeenAt).getTime();
+  if (ms < ONLINE_WINDOW_MS) return { online: true, label: "Online now" };
+  const mins = Math.max(1, Math.round(ms / 60_000));
+  const label = mins < 60 ? `${mins} min ago` : `${Math.round(mins / 60)} hr ago`;
+  return { online: false, label: `Last seen ${label}` };
+}
 
 interface AdminUser {
   id: string;
@@ -36,6 +49,7 @@ interface AdminUser {
   password_changed_at: string | null;
   created_at: string;
   updated_at: string;
+  last_seen_at?: string | null;
 }
 
 interface UserStat extends AdminUser {
@@ -155,6 +169,14 @@ export default function AdminPage() {
   useEffect(() => {
     const timer = window.setTimeout(() => void load(tab), 0);
     return () => window.clearTimeout(timer);
+  }, [tab, load]);
+
+  // Auto-refresh while on the users tab so "online now" stays live (each
+  // refresh re-reads last_seen_at from the backend).
+  useEffect(() => {
+    if (tab !== "users") return;
+    const id = window.setInterval(() => void load("users"), 60_000);
+    return () => window.clearInterval(id);
   }, [tab, load]);
 
   const createUser = async () => {
@@ -334,6 +356,21 @@ export default function AdminPage() {
                       <div className="flex flex-wrap items-center gap-2">
                         <span className="font-medium text-sm">{u.username}</span>
                         <Badge variant={u.role === "admin" ? "default" : "secondary"} className="text-[10px] px-1.5">{u.role}</Badge>
+                        {(() => {
+                          const st = onlineStatus(u.last_seen_at);
+                          return (
+                            <Badge
+                              variant="outline"
+                              className={cn(
+                                "text-[10px] px-1.5 gap-1",
+                                st.online ? "text-green-600 dark:text-green-400 border-green-500/40" : "text-muted-foreground"
+                              )}
+                            >
+                              <Circle className={cn("h-1.5 w-1.5 fill-current", st.online ? "text-green-500" : "text-muted-foreground/50")} />
+                              {st.online ? "online" : st.label}
+                            </Badge>
+                          );
+                        })()}
                         {u.enabled && <Badge variant="outline" className="text-[10px] px-1.5 text-green-600 dark:text-green-400">active</Badge>}
                         {!u.enabled && <Badge variant="destructive" className="text-[10px] px-1.5">disabled</Badge>}
                       </div>
@@ -500,6 +537,23 @@ export default function AdminPage() {
                             ) : (
                               <Badge variant="secondary" className="text-[10px] px-1.5">imported</Badge>
                             )}
+                            {u.role === "admin" || u.role === "user" ? (
+                              (() => {
+                                const st = onlineStatus(u.last_seen_at);
+                                return (
+                                  <Badge
+                                    variant="outline"
+                                    className={cn(
+                                      "text-[10px] px-1.5 gap-1",
+                                      st.online ? "text-green-600 dark:text-green-400 border-green-500/40" : "text-muted-foreground"
+                                    )}
+                                  >
+                                    <Circle className={cn("h-1.5 w-1.5 fill-current", st.online ? "text-green-500" : "text-muted-foreground/50")} />
+                                    {st.online ? "online" : st.label}
+                                  </Badge>
+                                );
+                              })()
+                            ) : null}
                           </div>
                           <p className="text-xs text-muted-foreground">Last extraction: {fmt(u.last_search_at)}</p>
                         </div>
@@ -575,10 +629,31 @@ export default function AdminPage() {
       {tab === "sentry" && (
         <Card>
           <CardHeader>
-            <CardTitle className="text-base">Sentry — Errors</CardTitle>
-            <CardDescription>
-              Backend and browser errors are logged here (last 24h: {errors24h ?? "…"} client errors).
-            </CardDescription>
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <CardTitle className="text-base">Sentry — Errors</CardTitle>
+                <CardDescription>
+                  Backend and browser errors are logged here (last 24h: {errors24h ?? "…"} client errors).
+                </CardDescription>
+              </div>
+              {errors.length > 0 && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="gap-2 shrink-0"
+                  onClick={() => {
+                    const text = errors
+                      .map((e) => `[${e.level}] ${e.component} — ${e.message} (${fmt(e.created_at)})`)
+                      .join("\n\n");
+                    navigator.clipboard.writeText(text);
+                    setCopied("sentry-errors");
+                    setTimeout(() => setCopied(null), 2000);
+                  }}
+                >
+                  <Copy className="h-3.5 w-3.5" /> {copied === "sentry-errors" ? "Copied!" : "Copy All Errors"}
+                </Button>
+              )}
+            </div>
           </CardHeader>
           <CardContent>
             {errors.length === 0 ? (
@@ -687,16 +762,16 @@ export default function AdminPage() {
               <pre className="text-xs bg-muted rounded-lg p-4 overflow-auto whitespace-pre-wrap leading-relaxed">
 {`PORT=5000
 HOST=127.0.0.1
-ALLOWED_ORIGINS=http://localhost:3000,__YOUR_VERCEL_URL__
+ALLOWED_ORIGINS=http://localhost:3000
 SESSION_COOKIE_NAME=sid
 SESSION_TTL_HOURS=24
 LOGIN_MAX_FAILURES_PER_IP=10
 LOGIN_MAX_FAILURES_PER_USER=6
 LOGIN_LOCK_WINDOW_MINUTES=15
-NEXT_PUBLIC_API_BASE_URL=https://__YOUR_TUNNEL_URL__
-PLAYWRIGHT_BROWSERS_PATH=D:\\Office work\\yawar leads\\playwright-browsers`}
+NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:5000
+PLAYWRIGHT_BROWSERS_PATH=C:\\path\\to\\this\\project\\playwright-browsers`}
               </pre>
-              <Button variant="outline" size="sm" className="gap-2 mt-3" onClick={() => handleCopy(`PORT=5000\nHOST=127.0.0.1\nALLOWED_ORIGINS=http://localhost:3000,__YOUR_VERCEL_URL__\nSESSION_COOKIE_NAME=sid\nSESSION_TTL_HOURS=24\nLOGIN_MAX_FAILURES_PER_IP=10\nLOGIN_MAX_FAILURES_PER_USER=6\nLOGIN_LOCK_WINDOW_MINUTES=15\nNEXT_PUBLIC_API_BASE_URL=https://__YOUR_TUNNEL_URL__\nPLAYWRIGHT_BROWSERS_PATH=D:\\Office work\\yawar leads\\playwright-browsers`, "env")}>
+              <Button variant="outline" size="sm" className="gap-2 mt-3" onClick={() => handleCopy(`PORT=5000\nHOST=127.0.0.1\nALLOWED_ORIGINS=http://localhost:3000\nSESSION_COOKIE_NAME=sid\nSESSION_TTL_HOURS=24\nLOGIN_MAX_FAILURES_PER_IP=10\nLOGIN_MAX_FAILURES_PER_USER=6\nLOGIN_LOCK_WINDOW_MINUTES=15\nNEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:5000\nPLAYWRIGHT_BROWSERS_PATH=C:\\path\\to\\this\\project\\playwright-browsers`, "env")}>
                 <Copy className="h-3.5 w-3.5" /> {copied === "env" ? "Copied!" : "Copy"}
               </Button>
             </CardContent>
@@ -706,12 +781,65 @@ PLAYWRIGHT_BROWSERS_PATH=D:\\Office work\\yawar leads\\playwright-browsers`}
 
       {tab === "health" && (
         <Card>
-          <CardHeader><CardTitle className="text-base">Backend Health</CardTitle></CardHeader>
+          <CardHeader>
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <CardTitle className="text-base">Backend Health</CardTitle>
+                <CardDescription>Runtime status, database and backup information.</CardDescription>
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                className="gap-2 shrink-0"
+                onClick={async () => {
+                  setError(null);
+                  setOk(null);
+                  try {
+                    const r = await api.post<{ success: boolean; name: string }>("/admin/backup", {});
+                    setOk(`Backup created: ${r.name.split("\\").pop()}`);
+                    await load("health");
+                  } catch (e) {
+                    setError(e instanceof Error ? e.message : "Backup failed");
+                  }
+                }}
+              >
+                <Database className="h-3.5 w-3.5" /> Manual Backup
+              </Button>
+            </div>
+          </CardHeader>
           <CardContent>
             {!health ? (
               <p className="text-sm text-muted-foreground flex items-center gap-2"><Loader2 className="h-4 w-4 animate-spin" /> Loading…</p>
             ) : (
-              <pre className="text-xs bg-muted rounded-lg p-4 overflow-auto max-h-[70vh]">{JSON.stringify(health, null, 2)}</pre>
+              <div className="space-y-4">
+                {(() => {
+                  const b = (health as { backup?: { status: string; last_backup: string | null; last_backup_name: string | null; backup_count: number; total_size_mb: number; location?: string } }).backup;
+                  if (!b) return null;
+                  const hasBackups = b.status === "ok" && b.backup_count > 0;
+                  return (
+                    <div className="rounded-lg border p-4 flex flex-wrap items-center gap-3">
+                      {hasBackups ? (
+                        <>
+                          <CheckCircle2 className="h-5 w-5 text-green-600 dark:text-green-400" />
+                          <div className="min-w-0">
+                            <p className="text-sm font-medium">Backups: {b.backup_count} found</p>
+                            <p className="text-xs text-muted-foreground">
+                              Last: {b.last_backup_name} · {b.last_backup ? new Date(b.last_backup).toLocaleString() : "—"} · {(b.total_size_mb || 0).toFixed(1)} MB total
+                            </p>
+                            {b.location && <p className="text-xs text-muted-foreground/70">Location: {b.location}</p>}
+                          </div>
+                        </>
+                      ) : (
+                        <>
+                          <XCircle className="h-5 w-5 text-amber-600 dark:text-amber-400" />
+                          <p className="text-sm font-medium">No backups yet — run the daily task or click &ldquo;Manual Backup&rdquo;</p>
+                        </>
+                      )}
+                    </div>
+                  );
+                })()}
+                <pre className="text-xs bg-muted rounded-lg p-4 overflow-auto max-h-[70vh]">{JSON.stringify(health, null, 2)}</pre>
+              </div>
             )}
           </CardContent>
         </Card>

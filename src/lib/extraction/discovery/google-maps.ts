@@ -1,13 +1,57 @@
 import type { Page } from 'playwright';
 import { withPage } from '../browser';
 import type { DiscoveryBusiness } from '@/types';
-import { normalizeString } from '@/lib/utils';
+import { normalizeString, distinctiveBusinessTokens } from '@/lib/utils';
 import { countryNameToISO2 } from '@/lib/utils/countries';
+import { citiesForCountry } from '@/lib/utils/cities';
+
+/**
+ * Work out the city for a country-wide Maps run.
+ *
+ * A country-wide search passes no `city`, and the raw card only carries a
+ * combined street address, so every lead used to persist with city = NULL —
+ * which breaks per-city filtering, de-duplication and CSV grouping for exactly
+ * the runs the user cares about (whole Pakistan, all of UAE, UK-wide).
+ *
+ * Resolution order: the known city list for the target country (precise), then
+ * the trailing comma segment of the address when it is plainly a place name.
+ */
+function resolveLocality(
+  requestedCity: string | undefined,
+  country: string | undefined,
+  address: string | undefined
+): string | undefined {
+  if (requestedCity) return requestedCity;
+  if (!address) return undefined;
+
+  const haystack = address.toLowerCase();
+  const known = citiesForCountry(country);
+  // Prefer the longest match so "Islamabad Capital Territory" beats "Islamabad".
+  let best: string | undefined;
+  for (const candidate of known) {
+    const c = candidate.toLowerCase();
+    if (!c || c.length < 3) continue;
+    if (!haystack.includes(c)) continue;
+    if (!best || c.length > best.length) best = candidate;
+  }
+  if (best) return best;
+
+  // Fallback: the last comma-delimited segment, when it reads like a place.
+  const segments = address.split(',').map((s) => s.trim()).filter(Boolean);
+  const last = segments[segments.length - 1];
+  if (!last || last.length < 3 || last.length > 40) return undefined;
+  if (/\d/.test(last)) return undefined;
+  if (/^(road|rd|street|st|avenue|ave|lane|block|fl|floor|flat|near|opposite)$/i.test(last)) return undefined;
+  if (!/[a-z]{3}/i.test(last)) return undefined;
+  return last;
+}
 
 export interface GoogleMapsOptions {
   headless?: boolean;
   fetchDetails?: boolean;
   maxScrolls?: number;
+  /** Cancellation probe: bail out of the crawl at the next loop boundary. */
+  shouldAbort?: () => Promise<boolean>;
 }
 
 const GMAPS_URL = 'https://www.google.com/maps/search';
@@ -47,6 +91,8 @@ const CARD_TRAILER = /^(directions|save|share|website|call|get directions|\d+ ph
 
 type CardDetails = {
   name: string;
+  // This card's own /maps/place/ URL, captured while the feed is loaded.
+  placeHref?: string;
   rating?: number;
   reviews?: number;
   category?: string;
@@ -79,6 +125,9 @@ export async function discoverFromGoogleMaps(
 ): Promise<DiscoveryBusiness[]> {
   const fetchDetails = options.fetchDetails ?? true;
   const maxScrolls = options.maxScrolls ?? 30;
+  const shouldAbort = options.shouldAbort;
+
+  const aborted = async () => (shouldAbort ? await shouldAbort() : false);
 
   const cards = new Map<string, CardDetails>();
 
@@ -120,6 +169,7 @@ export async function discoverFromGoogleMaps(
     // Scroll the results feed to force lazy-loading of more cards. Country
     // feeds need more scrolls to reach their full card count (50-100+).
     for (let s = 0; s < maxScrolls; s++) {
+      if (await aborted()) return Array.from(cards.values());
       const feed = page.locator('[role="feed"]').first();
       if (await feed.count().catch(() => 0)) {
         await feed.evaluate((el) => {
@@ -145,6 +195,7 @@ export async function discoverFromGoogleMaps(
           }).catch(() => {});
           await randomDelay(1200, 1800);
           for (let s2 = 0; s2 < maxScrolls / 2 && cards.size < limit; s2++) {
+            if (await aborted()) return Array.from(cards.values());
             await feed.evaluate((el) => {
               (el as HTMLElement).scrollBy(0, -1800);
             }).catch(() => {});
@@ -159,18 +210,40 @@ export async function discoverFromGoogleMaps(
 
     await collectCards(page, cards);
 
-    // Detail-click pass: fill phone/website/email/social/address from the
-    // right-hand detail panel for cards that are missing key fields.
+    // Detail-click pass: fill phone/website/email/social/address from each
+    // business's own place page.
+    //
+    // This used to look the card up by exact name inside the live feed and then
+    // navigate back to the results after every single card. When the feed failed
+    // to restore (which it does routinely), the lookup returned nothing and
+    // every REMAINING card returned immediately — silently. A live "Restraunt /
+    // Karachi" run collected 100 businesses and came back with 0 phones, 0
+    // websites and 1 of 50 verified. The place hrefs were captured during
+    // collection instead, so this pass now visits each place directly with no
+    // feed lookup and no return navigation.
     if (fetchDetails) {
-      for (const [name, card] of cards) {
+      const DETAIL_TIME_BUDGET_MS = 8 * 60 * 1000;
+      const detailStart = Date.now();
+      let attempted = 0;
+      let filled = 0;
+      for (const card of cards.values()) {
+        if (await aborted()) break;
         if (card.phone && card.website && card.address) continue;
-        try {
-          await clickCardAndExtract(page, name, card);
-        } catch {
-          // tolerate per-card failures
+        if (!card.placeHref) continue;
+        if (Date.now() - detailStart > DETAIL_TIME_BUDGET_MS) {
+          console.log(`[Discovery] detail budget exhausted after ${attempted} place pages (${filled} filled)`);
+          break;
         }
-        if (cards.size >= limit) break;
+        attempted += 1;
+        const got = await extractPlaceDetails(page, card);
+        if (got) filled += 1;
       }
+      // Never let this pass fail invisibly again — this is exactly the signal
+      // that was missing when a whole search returned zero usable leads.
+      const withPhone = Array.from(cards.values()).filter((c) => c.phone).length;
+      console.log(
+        `[Discovery] detail pass: ${attempted} place pages, ${filled} panels read, ${withPhone}/${cards.size} cards now have a phone`
+      );
     }
 
     return Array.from(cards.values());
@@ -183,7 +256,7 @@ export async function discoverFromGoogleMaps(
     .map((c) => ({
       name: c.name,
       address: c.address,
-      city: city || undefined,
+      city: resolveLocality(city, country, c.address),
       country: country || undefined,
       country_code: countryNameToISO2(country) || undefined,
       website: c.website,
@@ -209,26 +282,34 @@ export async function discoverFromGoogleMaps(
 async function collectCards(page: Page, cards: Map<string, CardDetails>) {
   const rawCards = await page.evaluate(() => {
     const feed = document.querySelector('[role="feed"]');
-    if (!feed) return [] as { text: string; anchors: { href: string; text: string }[] }[];
+    if (!feed) return [] as { text: string; anchors: { href: string; text: string }[]; placeHref: string | null }[];
     const children = feed.children;
-    const out: { text: string; anchors: { href: string; text: string }[] }[] = [];
+    const out: { text: string; anchors: { href: string; text: string }[]; placeHref: string | null }[] = [];
     for (let i = 0; i < children.length; i++) {
       const el = children[i] as HTMLElement;
       const anchors: { href: string; text: string }[] = [];
+      let placeHref: string | null = null;
       for (const a of Array.from(el.querySelectorAll('a[href]'))) {
         const href = a.getAttribute('href') || '';
+        if (!placeHref && /google\.com\/maps\/place|\/maps\/place\//.test(href)) placeHref = href;
         if (href.startsWith('http')) {
           anchors.push({ href, text: ((a as HTMLElement).innerText || '').trim() });
         }
       }
-      out.push({ text: el.innerText || '', anchors });
+      out.push({ text: el.innerText || '', anchors, placeHref });
     }
     return out;
   }).catch(() => []);
 
-  for (const { text, anchors } of rawCards) {
+  for (const { text, anchors, placeHref } of rawCards) {
     const card = parseCardText(text);
     if (!card || !card.name) continue;
+
+    // Capture this card's own /maps/place/ link now, while the feed is loaded.
+    // The detail pass used to navigate away per card and then re-read the feed
+    // to find the next one; if the feed ever failed to restore, every remaining
+    // card silently no-opped and the whole search came back with zero phones.
+    if (placeHref && !card.placeHref) card.placeHref = placeHref;
 
     // Website is the anchor that reads "Website" (not a maps/place link).
     for (const a of anchors) {
@@ -268,15 +349,122 @@ async function collectCards(page: Page, cards: Map<string, CardDetails>) {
   }
 }
 
+/**
+ * Short words that carry no brand identity. Needed because the 4+ character
+ * tokenizer drops them entirely, and a 3-letter category word must not be
+ * allowed to vouch for a neighbouring business.
+ */
+const TITLE_MATCH_STOPWORDS = new Set([
+  'the', 'and', 'for', 'bar', 'deli', 'inn', 'pub', 'spa', 'gym', 'tea', 'pot',
+  'set', 'box', 'hub', 'lab', 'pet', 'car', 'art', 'big', 'one', 'two', 'new',
+  'old', 'hot', 'red', 'top', 'kid', 'joy', 'cup', 'pie', 'bbq', 'tik',
+]);
+
+/** Letters/digits only, lowercased. Apostrophes and the private-use glyphs
+    Google injects into card titles are punctuation noise and must never
+    influence the match decision. */
+function matchKey(value: string): string {
+  return normalizeString(value).toLowerCase().replace(/[^a-z0-9]+/g, '');
+}
+
+/**
+ * Confirm that the panel we are about to read belongs to the business whose
+ * href we followed.
+ *
+ * This is a drift detector, not an identity proof: the href was captured from
+ * that exact card, so the panel is already the right listing. What it must do
+ * is reject a visibly different neighbour (which would mark the WRONG company
+ * as "verified") without discarding genuine businesses.
+ *
+ * Order matters, loosest-safe last:
+ *  1. identical keys, or one key inside the other (branch suffixes such as
+ *     "Karachi - Denso Hall", and truncated panel titles);
+ *  2. any distinctive 4+ char non-generic name token inside the title;
+ *  3. any 3+ char non-generic token. This fallback is essential: short brand
+ *     names yield NO tokens from the 4+ char tokenizer ("Wok's" -> "wok",
+ *     "CA'te RA'tie" -> "ca te ra tie"), and `[].some(...)` is always false, so
+ *     those businesses were being thrown away on every single run.
+ */
+function titleMatchesBusiness(businessName: string, panelTitle: string): boolean {
+  const nameKey = matchKey(businessName);
+  const titleKey = matchKey(panelTitle);
+  if (!nameKey || !titleKey) return false;
+  if (nameKey === titleKey) return true;
+  if (nameKey.includes(titleKey) || titleKey.includes(nameKey)) return true;
+
+  if (distinctiveBusinessTokens(businessName).some((t) => titleKey.includes(t))) return true;
+
+  return businessName
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .filter((t) => t.length >= 3 && !TITLE_MATCH_STOPWORDS.has(t))
+    .some((t) => titleKey.includes(t));
+}
+
+// Street types and other tokens that Maps users leave behind as a whole
+// "address". On their own they locate nothing ("road", "FL3 TH6", "G6, K.D.A").
+const STREET_FRAGMENTS = new Set([
+  'road', 'street', 'shop', 'block', 'sector', 'floor', 'flat', 'apartment',
+  'building', 'house', 'corner', 'main', 'link', 'road.', 'rd.', 'st.',
+]);
+
+// Maps owners stuff instructions into the address field. They are not part of
+// the location and actively mislead anyone reading the lead, e.g. the live
+// lead "Marketing agency call na karain, National Complex, Rashid Minhas Rd".
+const ADDRESS_NOISE = [
+  /\b(marketing|advertis\w*|seo|promotion|promotional)\b[^,]*/gi,
+  /\b(call|calling|phone|ring|contact)\b[^,]*(na|nahi|not|karain|karein|karna|before|plz|please)[^,]*/gi,
+  /\b(na|nahi|not)\s*(call|contact|ring|disturb)[^,]*/gi,
+  /\bplease\s+(call|contact|ring|visit|call\s+before)[^,]*/gi,
+  /\b(do\s*n[o']?t|don'?t)\s+(call|contact|ring)[^,]*/gi,
+  /\b(free|paid|car|street|open)\s+parking\b[^,]*/gi,
+  /\b24\s*\/\s*7\b/gi,
+  /\b(near|next\s+to|opposite|behind|beside|in\s+front\s+of)\b\s*$/i,
+];
+
+/**
+ * Decide whether a parsed address string is actually usable as a lead's
+ * location. Rejects the empty, single-street-word and punctuation-only values
+ * that the Maps card feed produces, rather than storing them as "verified"
+ * addresses.
+ */
+function isUsableAddress(addr: string | null | undefined): addr is string {
+  if (!addr) return false;
+  const trimmed = addr.trim();
+  if (trimmed.length < 5) return false;
+  if (STREET_FRAGMENTS.has(trimmed.toLowerCase().replace(/[.]/g, '.'))) return false;
+  // Punctuation/digit soup such as "FL3 TH6" or "G6, K.D.A" has no real word
+  // content beyond one or two two-letter fragments.
+  const words = trimmed.split(/[\s,]+/).filter(Boolean);
+  if (!words.length) return false;
+  const alphaWords = words.filter((w) => /[a-z]{3,}/i.test(w));
+  if (alphaWords.length === 0) return false;
+  if (words.length <= 2 && alphaWords.length <= 1 && !/\d/.test(trimmed)) return false;
+  return true;
+}
+
 function cleanAddress(raw: string): string {
   // Strip invisible/icon glyphs (private-use area, emoji-ish), arrows, and
   // leading separators/commas (" , 2354 N Lindbergh Blvd" -> "2354 N...")
-  return raw
+  let out = raw
     .replace(/[\u0000-\u001f\u007f-\u009f\uE000-\uF8FF\uFE00-\uFE0F\u2190-\u21FF\u2300-\u23FF]/g, '')
     .replace(/\s+/g, ' ')
     .replace(/^[\s,·•|:;]+/, '')
     .replace(/[\s,·•|:;]+$/, '')
     .trim();
+
+  // Drop owner-entered instructions, then any comma-separated clause left
+  // empty behind them ("Marketing agency call na karain, , Rashid Minhas Rd").
+  for (const rule of ADDRESS_NOISE) out = out.replace(rule, ' ');
+  out = out
+    .replace(/(?:\s*,\s*){2,}/g, ', ')
+    .replace(/^[\s,·•|:;]+/, '')
+    .replace(/[\s,·•|:;]+$/, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  return isUsableAddress(out) ? out : '';
 }
 
 /**
@@ -303,7 +491,14 @@ function parseCardText(text: string): CardDetails | null {
     const line = lines[idx];
     if (!line) continue;
     if (CHROME(line)) continue;
-    name = line;
+    // Google interleaves private-use-area glyphs and U+FFFD replacement chars
+    // into some card titles ("CA'te RA'tie �?"). They wreck every downstream
+    // match — deduplication, the panel-title gate and the CRM export — so they
+    // are dropped here rather than carried through the whole pipeline.
+    name = line
+      .replace(/[\uE000-\uF8FF\uF900-\uFAFF\ufffd\u200b-\u200f\ufe00-\ufe0f]/gu, '')
+      .replace(/\s+/g, ' ')
+      .trim();
     break;
   }
   if (!name || normalizeString(name).length <= 1) return null;
@@ -375,7 +570,7 @@ function parseCardText(text: string): CardDetails | null {
 
     // Address-ish line (has comma, moderate length)
     if (!card.address && /,/.test(line) && line.length < 80) {
-      card.address = cleanAddress(line);
+      card.address = cleanAddress(line) || undefined;
     }
   }
 
@@ -383,97 +578,168 @@ function parseCardText(text: string): CardDetails | null {
 }
 
 function CHROME(line: string): boolean {
-  return FEED_CHROME.some((r) => r.test(line));
+  // Strip private-use-area glyphs Google injects between words (e.g.
+  // "Price" + icon + "Rating" + icon + "All filters"), then test the
+  // plain-text line.
+  const plain = line.replace(/[\uE000-\uF8FF\uF900-\uFAFF\ue000-\ue0ff\uF000-\uFFFF]/gu, ' ').replace(/\s+/g, ' ').trim();
+  return FEED_CHROME.some((r) => r.test(plain));
 }
 
-async function clickCardAndExtract(page: Page, name: string, card: CardDetails): Promise<void> {
-  // Find and click the feed card whose name matches.
-  const feed = page.locator('[role="feed"] > div');
-  const count = await feed.count().catch(() => 0);
-  let clicked = false;
-  for (let i = 0; i < count; i++) {
-    const el = feed.nth(i);
-    const txt = ((await el.innerText().catch(() => '')) || '').trim();
-    const firstLine = txt.split('\n').find((l: string) => l.trim() && !CHROME(l.trim()));
-    if (firstLine?.trim() === name) {
-      try {
-        await el.click();
-        clicked = true;
-      } catch {
-        // fall through
+type DetailPanelOut = {
+  phone?: string; website?: string; email?: string;
+  instagram?: string; facebook?: string; linkedin?: string;
+  address?: string; lat?: number; lng?: number;
+  rawText?: string; title?: string;
+};
+
+async function extractDetailPanel(page: Page): Promise<DetailPanelOut | null> {
+  return page
+    .evaluate(() => {
+      const out: DetailPanelOut = {};
+
+      // The detail panel's title element. Used by the caller to verify the
+      // panel we just read really belongs to THIS business before its data is
+      // trusted.
+      const titleEl = document.querySelector('[role="main"] h1');
+      if (titleEl) out.title = (titleEl.textContent || '').trim().slice(0, 120);
+
+      const isPhoneCandidate = (s: string | null | undefined) => !!s && /\d{2,}/.test(s);
+
+      // Google Maps renders its phone affordance differently across layouts: a
+      // raw tel: link, a "call" button, a `data-item-id="telephone"` node, or an
+      // aria-label that starts with the number itself. Sniff all of them and
+      // prefer the international ("+…") form when available.
+      const phoneEls = document.querySelectorAll(
+        'a[href^="tel:"], button[data-item-id*="phone" i], a[data-item-id*="phone" i], ' +
+        '[data-item-id="telephone"], [data-item-id="phone"], [aria-label*="call" i], ' +
+        '[aria-label*="phone" i], [aria-label*="tel:"], a[aria-label^="+"]'
+      );
+      const candidates: string[] = [];
+      for (const el of Array.from(phoneEls)) {
+        const href = el.getAttribute('href') || '';
+        const aria = el.getAttribute('aria-label') || '';
+        const txt = el.textContent || '';
+        if (href.startsWith('tel:')) candidates.push(href.replace('tel:', '').trim());
+        else if (isPhoneCandidate(aria)) candidates.push(aria.replace(/^[^0-9+]*/, '').trim());
+        else if (isPhoneCandidate(txt)) candidates.push(txt.trim());
       }
-      break;
+      const withPlus = candidates.find((c) => c.startsWith('+'));
+      if (withPlus) out.phone = withPlus;
+      else if (candidates.length > 0) out.phone = candidates[0];
+
+      const webEl = document.querySelector('a[data-item-id="authority"], a[aria-label*="Website" i], a[aria-label*="website" i]');
+      if (webEl) {
+        const href = webEl.getAttribute('href') || '';
+        if (href && !href.includes('google.com')) out.website = href;
+      }
+
+      const links = document.querySelectorAll('a[href]');
+      for (const a of Array.from(links)) {
+        const href = (a as HTMLAnchorElement).href || '';
+        if (/instagram\.com/i.test(href) && !out.instagram) out.instagram = href;
+        if (/facebook\.com/i.test(href) && !out.facebook) out.facebook = href;
+        if (/linkedin\.com/i.test(href) && !out.linkedin) out.linkedin = href;
+        if (href.startsWith('mailto:') && !out.email) out.email = href.replace('mailto:', '').trim();
+      }
+
+      const panel = document.querySelector('[role="main"]');
+      if (panel) {
+        const text = (panel as HTMLElement).innerText || '';
+        out.rawText = text;
+        if (!out.phone) {
+          // Some Google Maps layouts render the phone as plain text with no
+          // phone-specific element. Look for a phone on its own line (starting
+          // with "+", like "+92 21 111 222 333") or a labeled one.
+          const ownLine = text.match(/(?:^|\n)\s*(\+\d[\d\s().-]{6,}\d)\s*$/m);
+          const labeled = text.match(/(?:^|\n)\s*(?:phone|tel)\s*[:…]\s*(\+?\d[\d\s().-]{6,}\d)/im);
+          if (ownLine) out.phone = ownLine[1].trim();
+          else if (labeled) out.phone = labeled[1].trim();
+          // Generic fallback: any unambiguous phone-like token (a "+" number or
+          // a long digit group) anywhere in the panel text.
+          if (!out.phone) {
+            const generic = text.match(/(?:\+\d[\d\s().-]{6,}\d|\b\d{3}[\s.-]\d{3,4}[\s.-]\d{3,4}\b)/);
+            if (generic) out.phone = generic[0].trim();
+          }
+        }
+        if (!out.email) {
+          const em = text.match(/([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[A-Za-z]{2,})/);
+          if (em) out.email = em[1];
+        }
+        if (!out.instagram) {
+          const ig = text.match(/(https?:\/\/(?:www\.)?instagram\.com\/[^\s"']+)/i);
+          if (ig) out.instagram = ig[1];
+        }
+        if (!out.facebook) {
+          const fb = text.match(/(https?:\/\/(?:www\.)?facebook\.com\/[^\s"']+)/i);
+          if (fb) out.facebook = fb[1];
+        }
+        if (!out.linkedin) {
+          const li = text.match(/(https?:\/\/(?:www\.)?linkedin\.com\/[^\s"']+)/i);
+          if (li) out.linkedin = li[1];
+        }
+        const coord = text.match(/@(-?\d+\.\d+),(-?\d+\.\d+)/);
+        if (coord) {
+          out.lat = parseFloat(coord[1]);
+          out.lng = parseFloat(coord[2]);
+        }
+      }
+
+      return out;
+    })
+    .catch((err: unknown) => {
+      // Surfaced instead of silently becoming null: a swallowed error here is
+      // what made a whole search look like "Google gave us no data".
+      console.log(`[Discovery] detail panel read failed: ${String(err).slice(0, 160)}`);
+      return null;
+    });
+}
+
+/**
+ * Visit one business's own /maps/place/ page and copy its contact fields onto
+ * the card. The href was captured while the results feed was loaded, so there
+ * is no feed lookup and — crucially — no need to navigate back afterwards.
+ *
+ * Card clicks themselves are unreliable headless ("limited view" renders no
+ * side panel), which is why this goes straight to the place URL.
+ *
+ * Returns true when the panel was actually read.
+ */
+async function extractPlaceDetails(page: Page, card: CardDetails): Promise<boolean> {
+  const name = card.name;
+  const rawHref = card.placeHref;
+  if (!rawHref) return false;
+  const abs = rawHref.startsWith('http') ? rawHref : `https://www.google.com${rawHref}`;
+
+  // The place page renders its panel asynchronously (React app shell) and
+  // sometimes serves a degraded no-JS shell on first load. Poll until the
+  // business title paints; retry the navigation a couple of times before
+  // giving up on this card.
+  let panelReady: string | null = null;
+  for (let attempt = 0; attempt < 3 && !panelReady; attempt++) {
+    await page
+      .goto(abs, { waitUntil: 'domcontentloaded', timeout: 30000 })
+      .catch(() => null);
+    panelReady = await pollForPanelTitle(page);
+    if (!panelReady && attempt < 2) await randomDelay(900, 1600);
+  }
+
+  if (!panelReady) return false;
+
+  await randomDelay(800, 1500);
+
+  const detail = await extractDetailPanel(page);
+  if (!detail) return false;
+
+  // Correctness gate: the panel title must actually be THIS business. A card's
+  // name can drift when neighbours share the same first line; adopting foreign
+  // contact data would mark the WRONG company as "verified".
+  const title = detail.title;
+  if (title && name) {
+    if (!titleMatchesBusiness(name, title)) {
+      console.log(`[Discovery] ${name} — detail panel title "${title}" does not match business, skipping extraction`);
+      return false;
     }
   }
-  if (!clicked) return;
-
-  await randomDelay(900, 1500);
-
-  // Extract the detail panel content in ONE evaluate — fast and simple.
-  const detail = await page.evaluate(() => {
-    const out: {
-      phone?: string; website?: string; email?: string;
-      instagram?: string; facebook?: string; linkedin?: string;
-      address?: string; lat?: number; lng?: number;
-    } = {};
-
-    const phoneEl = document.querySelector('a[href^="tel:"], button[data-item-id*="phone"], a[data-item-id*="phone"]');
-    if (phoneEl) {
-      const href = phoneEl.getAttribute('href') || '';
-      if (href.startsWith('tel:')) out.phone = href.replace('tel:', '').trim();
-      else {
-        const aria = phoneEl.getAttribute('aria-label') || '';
-        const txt = phoneEl.textContent || '';
-        if (/\d/.test(aria)) out.phone = aria.replace(/^[^0-9+]*/, '').trim();
-        else if (/\d/.test(txt)) out.phone = txt.trim();
-      }
-    }
-
-    const webEl = document.querySelector('a[data-item-id="authority"], a[aria-label*="Website"], a[aria-label*="website"]');
-    if (webEl) {
-      const href = webEl.getAttribute('href') || '';
-      if (href && !href.includes('google.com')) out.website = href;
-    }
-
-    const links = document.querySelectorAll('a[href]');
-    for (const a of Array.from(links)) {
-      const href = (a as HTMLAnchorElement).href || '';
-      if (/instagram\.com/i.test(href) && !out.instagram) out.instagram = href;
-      if (/facebook\.com/i.test(href) && !out.facebook) out.facebook = href;
-      if (/linkedin\.com/i.test(href) && !out.linkedin) out.linkedin = href;
-      if (href.startsWith('mailto:') && !out.email) out.email = href.replace('mailto:', '').trim();
-    }
-
-    const panel = document.querySelector('[role="main"]');
-    if (panel) {
-      const text = (panel as HTMLElement).innerText || '';
-      if (!out.email) {
-        const em = text.match(/([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[A-Za-z]{2,})/);
-        if (em) out.email = em[1];
-      }
-      if (!out.instagram) {
-        const ig = text.match(/(https?:\/\/(?:www\.)?instagram\.com\/[^\s"']+)/i);
-        if (ig) out.instagram = ig[1];
-      }
-      if (!out.facebook) {
-        const fb = text.match(/(https?:\/\/(?:www\.)?facebook\.com\/[^\s"']+)/i);
-        if (fb) out.facebook = fb[1];
-      }
-      if (!out.linkedin) {
-        const li = text.match(/(https?:\/\/(?:www\.)?linkedin\.com\/[^\s"']+)/i);
-        if (li) out.linkedin = li[1];
-      }
-      const coord = text.match(/@(-?\d+\.\d+),(-?\d+\.\d+)/);
-      if (coord) {
-        out.lat = parseFloat(coord[1]);
-        out.lng = parseFloat(coord[2]);
-      }
-    }
-
-    return out;
-  }).catch(() => {
-    return { phone: undefined, website: undefined, email: undefined, instagram: undefined, facebook: undefined, linkedin: undefined, address: undefined, lat: undefined, lng: undefined };
-  });
 
   if (detail.phone && !card.phone) card.phone = detail.phone;
   if (detail.website && !card.website) card.website = detail.website;
@@ -487,7 +753,28 @@ async function clickCardAndExtract(page: Page, name: string, card: CardDetails):
     card.longitude = detail.lng;
   }
 
-  // Close the detail panel.
-  await page.keyboard.press('Escape').catch(() => {});
-  await randomDelay(350, 700);
+  return true;
+}
+
+/**
+ * Wait for a business's detail panel to paint and return its title.
+ *
+ * This used to hand-roll a polling loop inside a single `page.evaluate`
+ * returning a Promise. That approach broke in a way that was invisible: the
+ * evaluate threw, `.catch(() => null)` swallowed it, and EVERY card reported
+ * "no panel" — so a search discovered 100 businesses and extracted 0 phones.
+ * Playwright's own locator waiting is used instead, and the title is read with
+ * a separate call so a read failure can never be mistaken for "not ready".
+ */
+async function pollForPanelTitle(page: Page): Promise<string | null> {
+  const h1 = page.locator('[role="main"] h1').first();
+  try {
+    await h1.waitFor({ state: 'attached', timeout: 15000 });
+  } catch {
+    return null;
+  }
+  // Give the rest of the panel (phone/website buttons) a moment to attach after
+  // the heading paints; a place page paints its title noticeably before them.
+  await page.waitForTimeout(600);
+  return h1.innerText().then((t) => t.trim().slice(0, 120)).catch(() => null);
 }

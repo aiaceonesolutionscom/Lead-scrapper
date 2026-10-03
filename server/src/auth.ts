@@ -13,6 +13,7 @@ export interface AppUser {
   enabled: boolean;
   onboarding_seen: boolean;
   password_changed_at: string | null;
+  last_seen_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -27,6 +28,7 @@ export function toAppUser(row: object): AppUser {
     enabled: Boolean(r.enabled),
     onboarding_seen: Boolean(r.onboarding_seen),
     password_changed_at: (r.password_changed_at as string) ?? null,
+    last_seen_at: (r.last_seen_at as string) ?? null,
     created_at: String(r.created_at),
     updated_at: String(r.updated_at),
   };
@@ -110,28 +112,58 @@ export function getUserFromSession(sessionId: string): AppUser | null {
     )
     .get(sessionId, nowIso()) as Record<string, unknown> | undefined;
   if (!row) return null;
+  touchLastSeen(String(row.id));
   return toAppUser(row);
+}
+
+// Throttle last_seen_at writes: at most one DB update per user per 60s, so a
+// busy polling client (notifications etc.) doesn't hammer the disk. Admins see
+// "online now" / "last seen" in the user list.
+const lastSeenWrite = new Map<string, number>();
+const LAST_SEEN_THROTTLE_MS = 60_000;
+
+export function touchLastSeen(userId: string): void {
+  const now = Date.now();
+  const last = lastSeenWrite.get(userId) ?? 0;
+  if (now - last < LAST_SEEN_THROTTLE_MS) return;
+  lastSeenWrite.set(userId, now);
+  try {
+    db.prepare('UPDATE users SET last_seen_at = ? WHERE id = ?').run(nowIso(), userId);
+  } catch {
+    // non-critical
+  }
+}
+
+export function setLastSeenNow(userId: string): void {
+  lastSeenWrite.set(userId, Date.now());
+  try {
+    db.prepare('UPDATE users SET last_seen_at = ? WHERE id = ?').run(nowIso(), userId);
+  } catch {
+    // non-critical
+  }
 }
 
 export function cleanupExpiredSessions(): void {
   db.prepare('DELETE FROM sessions WHERE expires_at <= ?').run(nowIso());
 }
 
-export function setSessionCookie(res: Response, sid: string): void {
+export function setSessionCookie(res: Response, sid: string, secure: boolean): void {
   res.cookie(config.sessionCookieName, sid, {
     httpOnly: true,
-    sameSite: 'none',
-    secure: true,
+    // SameSite=None requires Secure; over plain HTTP (dev on localhost/LAN)
+    // the two are mutually exclusive, so sharpen both to match the transport.
+    sameSite: secure ? 'none' : 'lax',
+    secure,
     path: '/',
     maxAge: config.sessionTtlHours * 60 * 60 * 1000,
   });
 }
 
-export function clearSessionCookie(res: Response): void {
+export function clearSessionCookie(res: Response, secure: boolean): void {
   res.clearCookie(config.sessionCookieName, {
     httpOnly: true,
-    sameSite: 'none',
-    secure: true,
+    sameSite: secure ? 'none' : 'lax',
+    secure,
     path: '/',
   });
 }

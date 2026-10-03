@@ -116,6 +116,21 @@ async function getContext(): Promise<BrowserContext> {
         });
       });
 
+      // tsx/esbuild compiles this project with `keepNames`, which rewrites
+      // every inner function to `__name(fn, "fn")`. That helper only exists in
+      // the Node module scope — so any such function passed to
+      // `page.evaluate` throws "ReferenceError: __name is not defined" once it
+      // is serialized into the page. It failed silently (the callers catch and
+      // return null), which is why Google Maps returned 100+ businesses and
+      // ZERO phone numbers. Defining `__name` as the identity function in every
+      // page fixes every evaluate in the codebase at once.
+      await context.addInitScript(() => {
+        const w = window as unknown as { __name?: unknown };
+        if (typeof w.__name !== 'function') {
+          w.__name = (fn: unknown) => fn;
+        }
+      });
+
       return context;
     })();
 

@@ -19,8 +19,18 @@ import {
   Shield,
   UserCircle,
   LifeBuoy,
+  TriangleAlert,
 } from "lucide-react";
 import { ThemeToggle } from "@/components/shared/theme-toggle";
+import {
+  Dialog,
+  DialogClose,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 
 const userNav = [
   { href: "/", label: "Dashboard", icon: LayoutDashboard },
@@ -42,15 +52,24 @@ export function Sidebar({ user }: { user?: AuthUser | null }) {
   const pathname = usePathname();
   const router = useRouter();
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [logoutOpen, setLogoutOpen] = useState(false);
+  const [loggingOut, setLoggingOut] = useState(false);
   const navItems = user?.role === "admin" ? adminNav : userNav;
 
   async function handleLogout() {
+    setLoggingOut(true);
     try {
       await api.post("/auth/logout");
     } catch {
       // continue
+    } finally {
+      setLoggingOut(false);
     }
     router.push("/login");
+  }
+
+  function confirmLogout() {
+    setLogoutOpen(true);
   }
 
   return (
@@ -140,7 +159,7 @@ export function Sidebar({ user }: { user?: AuthUser | null }) {
             variant="outline"
             size="sm"
             className="w-full gap-2"
-            onClick={handleLogout}
+            onClick={confirmLogout}
           >
             <LogOut className="h-4 w-4" />
             Logout
@@ -148,6 +167,36 @@ export function Sidebar({ user }: { user?: AuthUser | null }) {
           <p className="text-xs text-muted-foreground mt-3">Lead Extractor + CRM v1.0</p>
         </div>
       </aside>
+
+      {/* Logout confirmation */}
+      <Dialog open={logoutOpen} onOpenChange={setLogoutOpen}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <TriangleAlert className="h-5 w-5 text-destructive" />
+              Log out?
+            </DialogTitle>
+            <DialogDescription>
+              Are you sure you want to log out? Extractions keep running in the
+              background, and you can sign back in anytime.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <DialogClose asChild>
+              <Button variant="outline" disabled={loggingOut}>
+                Cancel
+              </Button>
+            </DialogClose>
+            <Button
+              variant="destructive"
+              disabled={loggingOut}
+              onClick={() => void handleLogout()}
+            >
+              {loggingOut ? "Logging out…" : "Log out"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </>
   );
 }

@@ -13,6 +13,11 @@ const NON_BUSINESS_DOMAINS = [
   'webmd.com', 'verywellhealth.com', 'mayoclinic.org', 'forbes.com',
   'businessinsider.com', 'wikihow.com', 'thefreedictionary.com',
   'vocabulary.com', 'etymonline.com', 'nih.gov', 'ncbi.nlm.nih.gov',
+  // Global consumer/corporate portals — surfaced when a Maps/search page
+  // fails and the browser's start page or a redirect target gets parsed.
+  'google.com', 'googleusercontent.com', 'support.google.com',
+  'accounts.google.com', 'youtube.com', 'netflix.com', 'microsoft.com',
+  'apple.com', 'amazon.com',
 ];
 
 const NON_BUSINESS_TITLE_PATTERNS = [
@@ -29,6 +34,15 @@ const NON_BUSINESS_TITLE_PATTERNS = [
   // Aggregator / listicle pages ("Best Salt Dealers in Houston") that are
   // directories rather than actual businesses.
   /^best\b.{0,80}\b(?:of|in|near)\b/i,
+  // Google/Chrome meta pages and SERP-tile junk ("Make Google your default
+  // search engine", "Trending now", Google account/gmail/YouTube help pages,
+  // "Netflix"). These surface when a Maps or search page fails to load and the
+  // browser's start page / trending tiles get read as business cards. None is
+  // ever a real local business.
+  /^(make google your default search engine)\b/i,
+  /^(trending now|trending searches?)\b/i,
+  /^(google account|google search help|google account help|gmail help|youtube (?:help|premium)|say hi to chrome|netflix)\b/i,
+  /^(sign in to google|create (?:a )?(?:google )?account)\b/i,
 ];
 
 const NON_BUSINESS_TITLE_EXTRA_ONLY = [

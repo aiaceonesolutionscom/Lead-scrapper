@@ -26,12 +26,22 @@ interface NominatimResult {
   address?: { country_code?: string; [key: string]: string | undefined };
 }
 
+// Public Overpass mirrors, ordered by measured reachability from this network
+// (verified live: de, mail.ru, osm.ch — the rest fail connect/DNS/timeout and
+// sit at the end, so a dead instance can never block the healthy ones).
+// Discovery only needs ONE mirror to answer; a healthy mirror answers a
+// small local-bbox query in 1-3 seconds.
 const OVERPASS_MIRRORS = [
   'https://overpass-api.de/api/interpreter',
-  'https://overpass.kumi.systems/api/interpreter',
   'https://maps.mail.ru/osm/tools/overpass/api/interpreter',
+  'https://overpass.osm.ch/api/interpreter',
   'https://overpass.private.coffee/api/interpreter',
 ];
+// A hanging mirror must not monopolize a location's discovery slot: fail it
+// after 15s and move on (the old 40s x several mirrors turned one dead mirror
+// into ~3 minutes of blocking, which is exactly the "upstream failed" wall).
+const OVERPASS_TIMEOUT_MS = 15000;
+const OVERPASS_RETRY_DELAY_MS = 2000;
 const NOMINATIM_API = 'https://nominatim.openstreetmap.org/search';
 
 const KEYWORD_TO_OSM_TAG: Record<string, { key: string; value: string }[]> = {
@@ -443,16 +453,13 @@ function parseOverpassResults(elements: OverpassElement[], sourceKeyword: string
   return businesses;
 }
 
-async function overpassRequest(query: string): Promise<OverpassResponse | null> {
-  // Rotate through mirrors with retry/backoff to handle rate limits (429/504).
-  const attempts = [
-    { mirror: OVERPASS_MIRRORS[0], delay: 4000 },
-    { mirror: OVERPASS_MIRRORS[1], delay: 4000 },
-    { mirror: OVERPASS_MIRRORS[2], delay: 6000 },
-    { mirror: OVERPASS_MIRRORS[3], delay: 6000 },
-  ];
-
-  for (const { mirror, delay } of attempts) {
+async function overpassRequest(query: string, shouldAbort?: () => Promise<boolean>): Promise<OverpassResponse | null> {
+  // Rotate through the mirror list with a short per-mirror timeout. A healthy
+  // mirror answers a local-bbox query in <10s; 15s is generous. When one
+  // mirror fails we move to the next quickly instead of each attempt burning
+  // 40s, so a dead instance can never stall the whole location.
+  for (const mirror of OVERPASS_MIRRORS) {
+    if (shouldAbort && (await shouldAbort())) return null;
     try {
       const response = await axios.post<OverpassResponse>(
         mirror,
@@ -462,7 +469,7 @@ async function overpassRequest(query: string): Promise<OverpassResponse | null> 
             'Content-Type': 'application/x-www-form-urlencoded',
             'User-Agent': 'LeadExtractor/1.0',
           },
-          timeout: 40000,
+          timeout: OVERPASS_TIMEOUT_MS,
           validateStatus: (status) => status >= 200 && status < 500,
         }
       );
@@ -477,7 +484,7 @@ async function overpassRequest(query: string): Promise<OverpassResponse | null> 
       console.warn(`[OSM] Overpass mirror ${mirror} failed: ${message}`);
     }
 
-    await sleep(delay);
+    await sleep(OVERPASS_RETRY_DELAY_MS);
   }
 
   return null;
@@ -499,15 +506,39 @@ function widenBBox(
   };
 }
 
+/**
+ * Clamp a bbox to `maxSpanDeg` per axis, centred on the bbox centroid.
+ * A name-regex Overpass query over a multi-degree city/country bbox scans
+ * hundreds of thousands of nodes and makes every mirror hang (504/timeout) —
+ * the "upstream failed" wall. A ~0.3deg bbox answers in ~2s. Keeps queries
+ * fast while still covering a full metro area.
+ */
+function capBBoxSpan(
+  bbox: { south: number; west: number; north: number; east: number },
+  maxSpanDeg: number
+): { south: number; west: number; north: number; east: number } {
+  const centerLat = (bbox.south + bbox.north) / 2;
+  const centerLon = (bbox.west + bbox.east) / 2;
+  const half = maxSpanDeg / 2;
+  return {
+    south: centerLat - half,
+    north: centerLat + half,
+    west: centerLon - half,
+    east: centerLon + half,
+  };
+}
+
 export async function discoverFromOSM(
   keyword: string,
   city: string,
   country: string,
   limit: number = 50,
-  round: number = 0
+  round: number = 0,
+  shouldAbort?: () => Promise<boolean>
 ): Promise<DiscoveryBusiness[]> {
   try {
     // Step 1: Geocode the location
+    if (shouldAbort && (await shouldAbort())) return [];
     const locationQuery = city
       ? `${city}, ${country}`
       : country;
@@ -518,6 +549,8 @@ export async function discoverFromOSM(
       console.error(`[OSM] Could not geocode location: ${locationQuery}`);
       return [];
     }
+
+    if (shouldAbort && (await shouldAbort())) return [];
 
     await sleep(1500);
 
@@ -555,13 +588,19 @@ export async function discoverFromOSM(
       bbox = widenBBox(bbox, multiplier);
     }
 
+    // Always clamp the final bbox: a name-regex scan over a huge city/country
+    // box stalls every mirror (this was the #1 OSM failure). 0.3deg cities /
+    // 0.5deg countries keep queries in the 1-5s range while covering a metro.
+    bbox = capBBoxSpan(bbox, city ? 0.3 : 0.5);
+
     const countryCode = geoResult.address?.country_code?.toUpperCase() || countryNameToISO2(country) || undefined;
 
     // Step 3: Query Overpass with bbox (mirror rotation + retry)
+    if (shouldAbort && (await shouldAbort())) return [];
     const query = buildOverpassBBoxQuery(keyword, bbox, limit);
     console.log(`[OSM] Querying Overpass bbox=${JSON.stringify(bbox)} keyword="${keyword}" round=${round}`);
 
-    const overpassData = await overpassRequest(query);
+    const overpassData = await overpassRequest(query, shouldAbort);
 
     if (!overpassData) {
       console.error('[OSM] All Overpass mirrors failed');

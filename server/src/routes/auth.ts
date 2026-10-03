@@ -15,6 +15,7 @@ import {
   destroySession,
   getUserByLogin,
   hashPassword,
+  setLastSeenNow,
   setSessionCookie,
   toAppUser,
   verifyPassword,
@@ -54,10 +55,55 @@ function clearFailures(username: string, ip: string): void {
 authRouter.post(
   '/login',
   asyncHandler(async (req: AppRequest, res: AppResponse) => {
-    const body = (req.body || {}) as { username?: unknown; email?: unknown; password?: unknown; company_website?: unknown };
+    const body = (req.body || {}) as {
+      username?: unknown;
+      email?: unknown;
+      password?: unknown;
+      company_website?: unknown;
+      captchaToken?: unknown;
+    };
     const identifier = typeof body.email === 'string' && body.email.trim() ? body.email : body.username;
     const password = body.password;
     const ip = req.ip || 'unknown';
+
+    // Cloudflare Turnstile — when a secret key is configured the request must
+    // carry a valid token. Two distinct states:
+    //   - no captchaToken field at all  -> client never had Turnstile; verify
+    //     as usual when a key is configured (reject).
+    //   - captchaToken === ""           -> client's widget timed out because
+    //     the challenge endpoint is unreachable on a flaky network (CGNAT);
+    //     allow the login to proceed — brute-force protection below (per-IP /
+    //     per-user failure locks, per-minute request cap) still applies.
+    if (config.turnstileSecretKey) {
+      const raw = body.captchaToken;
+      const token = typeof raw === 'string' ? raw : '';
+      const skipped = typeof raw === 'string' && raw === '';
+      if (!skipped) {
+        if (!token) {
+          return sendError(res, 400, 'Security check failed. Please try again.');
+        }
+        try {
+          const params = new URLSearchParams();
+          params.set('secret', config.turnstileSecretKey);
+          params.set('response', token);
+          const resp = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: params.toString(),
+          });
+          const data = (await resp.json()) as { success?: boolean; 'error-codes'?: string[] };
+          if (!data.success) {
+            logEvent('AUTH', 'warn', `Turnstile verification failed for ${ip}: ${data['error-codes']?.join(',') || 'unknown'}`);
+            return sendError(res, 400, 'Security check failed. Please try again.');
+          }
+        } catch {
+          logEvent('AUTH', 'warn', `Turnstile verify request error for ${ip}`);
+          return sendError(res, 500, 'Security check unavailable. Please try again.');
+        }
+      } else {
+        logEvent('AUTH', 'info', `Turnstile skipped (widget timeout) for ${ip}`);
+      }
+    }
 
     // Honeypot — a visually-hidden field the login form never asks real users
     // to fill. Autofill bots populate it; humans leave it empty. When tripped
@@ -100,7 +146,9 @@ authRouter.post(
 
     clearFailures(userKey, ip);
     const session = createSession(user.id);
-    setSessionCookie(res, session.id);
+    setLastSeenNow(user.id);
+    const secure = req.secure || req.get('x-forwarded-proto') === 'https';
+    setSessionCookie(res, session.id, secure);
     logEvent('AUTH', 'info', `User "${user.username}" logged in from ${ip}`);
     res.json({ user: toAppUser(user) });
   })
@@ -114,7 +162,8 @@ authRouter.post(
       destroySession(sid);
       logEvent('AUTH', 'info', 'User logged out');
     }
-    clearSessionCookie(res);
+    const secure = req.secure || req.get('x-forwarded-proto') === 'https';
+    clearSessionCookie(res, secure);
     res.json({ success: true });
   })
 );

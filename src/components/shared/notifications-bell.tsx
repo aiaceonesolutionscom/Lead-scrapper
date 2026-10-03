@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import { Bell, CheckCheck, Loader2, Search, Info, TriangleAlert } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { getNotifications, markNotificationsRead, type NotificationsResponse } from "@/lib/api";
+import { useToast, type Toast } from "@/components/shared/notification-toast";
 import type { AppNotification } from "@/types";
 
 const typeIcon = {
@@ -68,6 +69,7 @@ function playDing(): void {
 /** Sidebar bell: polls the API, shows an unread badge and a notifications panel. */
 export function NotificationsBell() {
   const router = useRouter();
+  const { pushToast } = useToast();
   const [data, setData] = useState<NotificationsResponse>({ notifications: [], unread: 0 });
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -82,8 +84,19 @@ export function NotificationsBell() {
       const ids = new Set(next.notifications.map((n) => n.id));
       const prev = seenIdsRef.current;
       if (prev !== null) {
-        const hasNew = next.notifications.some((n) => !prev.has(n.id));
-        if (hasNew && !document.hidden) playDing();
+        const newOnes = next.notifications.filter((n) => !prev.has(n.id));
+        if (newOnes.length > 0 && !document.hidden) {
+          playDing();
+          // WhatsApp-style slide-in toast for each new notification
+          for (const n of newOnes) {
+            pushToast({
+              title: n.title,
+              body: n.body || undefined,
+              type: n.type as Toast["type"],
+              link: n.link || undefined,
+            });
+          }
+        }
       }
       seenIdsRef.current = ids;
     } catch {

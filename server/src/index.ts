@@ -93,6 +93,14 @@ setInterval(() => {
   }
 }, config.sessionCleanupMinutes * 60 * 1000).unref();
 
+// Run cleanup once at startup so stale app_events from a previous long-lived
+// process don't keep piling up after a restart.
+try {
+  purgeOldEvents(config.logRetentionDays);
+} catch {
+  // non-critical
+}
+
 app.listen(config.port, config.host, () => {
   logEvent('HTTP', 'info', `Backend listening on ${config.host}:${config.port}`);
   console.log(`Backend listening on http://${config.host}:${config.port}`);

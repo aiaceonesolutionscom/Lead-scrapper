@@ -137,7 +137,7 @@ export const CITIES_BY_COUNTRY: Record<string, string[]> = {
   'North Macedonia': ['Skopje', 'Bitola', 'Kumanovo', 'Prilep', 'Tetovo'],
   'Norway': ['Oslo', 'Bergen', 'Trondheim', 'Stavanger', 'Drammen', 'Kristiansand'],
   'Oman': ['Muscat', 'Salalah', 'Sohar', 'Nizwa', 'Sur'],
-  'Pakistan': ['Karachi', 'Lahore', 'Faisalabad', 'Rawalpindi', 'Islamabad', 'Multan', 'Hyderabad', 'Gujranwala', 'Peshawar', 'Quetta', 'Sialkot'],
+  'Pakistan': ['Karachi', 'Lahore', 'Faisalabad', 'Rawalpindi', 'Islamabad', 'Multan', 'Hyderabad', 'Gujranwala', 'Peshawar', 'Quetta', 'Sialkot', 'Abbottabad', 'Mardan', 'Swat', 'Jhelum', 'Gujrat', 'Sargodha', 'Bahawalpur', 'Sukkur', 'Larkana', 'Rahim Yar Khan', 'Sahiwal', 'Okara', 'Kasur', 'Nowshera', 'Sheikhupura', 'Mandi Bahauddin', 'Khanewal', 'Mianwali', 'Kohat', 'Dera Ghazi Khan', 'Muzzafargarh', 'Vehari', 'Chakwal', 'Murree', 'Haripur', 'Attock', 'Taxila', 'Kotli', 'Mirpur', 'Bhimber'],
   'Palau': ['Ngerulmud', 'Koror', 'Airai'],
   'Palestine': ['Ramallah', 'Gaza City', 'Hebron', 'Nablus', 'Bethlehem', 'Jenin'],
   'Panama': ['Panama City', 'San Miguelito', 'David', 'Colón', 'La Chorrera'],

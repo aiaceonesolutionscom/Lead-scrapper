@@ -11,6 +11,7 @@ import { ThemeToggle } from "@/components/shared/theme-toggle";
 import { NotificationsBell } from "@/components/shared/notifications-bell";
 import { BrandLoader } from "@/components/shared/brand-loader";
 import { OnboardingModal } from "@/components/shared/onboarding-modal";
+import { ConnectionStatus } from "@/components/shared/connection-status";
 import { markOnboardingSeen } from "@/lib/api";
 
 export function AuthGate({ children }: { children: React.ReactNode }) {
@@ -83,6 +84,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
 
   return (
     <div className="flex h-full">
+      <ConnectionStatus />
       <Sidebar user={user} />
       {/* Notifications bell lives outside the sidebar so it is never clipped by
           the narrow sidebar column on mobile or laptop. Anchored to the top-right

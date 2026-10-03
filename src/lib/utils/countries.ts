@@ -230,6 +230,22 @@ export function countryNameToISO2(name: string | null | undefined): string | nul
   return COUNTRY_NAME_TO_ISO2[name.trim().toLowerCase()] || null;
 }
 
+/**
+ * Resolve any country spelling to the single canonical display name we store.
+ *
+ * Discovery sources return whatever the page said — "UK", "USA", "UAE" — so a
+ * plain export ended up with the same country split across several values
+ * ("UK" 50 rows vs "United Kingdom" 58 rows), breaking every country filter and
+ * pivot. Resolving through ISO2 collapses aliases onto one name.
+ */
+export function canonicalCountryName(name: string | null | undefined): string | null {
+  if (!name) return null;
+  const iso2 = countryNameToISO2(name);
+  if (!iso2) return name.trim() || null;
+  const match = COUNTRIES.find((c) => countryNameToISO2(c) === iso2);
+  return match || name.trim() || null;
+}
+
 // Canonical display names for the country picker (aliases like "USA"/"UK"
 // excluded — one clean entry per country, worldwide, not a curated subset).
 export const COUNTRIES: string[] = [

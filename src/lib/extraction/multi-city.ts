@@ -9,51 +9,9 @@
 // IMPORTANT scope rule (user requirement): a CITY search stays strictly
 // inside that one city — it never falls back to other cities. If the city
 // cannot produce the requested count, the search stops with what it found.
-// Only a country-wide search may sweep multiple cities (they are part of the
-// country).
-
-export const US_CITIES: string[] = [
-  'Los Angeles',
-  'San Diego',
-  'Phoenix',
-  'Houston',
-  'Dallas',
-  'San Antonio',
-  'Chicago',
-  'New York',
-  'Miami',
-  'Tampa',
-  'Orlando',
-  'Atlanta',
-  'Charlotte',
-  'Raleigh',
-  'Nashville',
-  'Denver',
-  'Salt Lake City',
-  'Seattle',
-  'Portland',
-  'San Francisco',
-  'Sacramento',
-  'Las Vegas',
-  'Minneapolis',
-  'Detroit',
-  'Cleveland',
-  'Cincinnati',
-  'Indianapolis',
-  'Kansas City',
-  'St. Louis',
-  'Oklahoma City',
-  'New Orleans',
-  'Memphis',
-  'Boston',
-  'Philadelphia',
-  'Baltimore',
-  'Richmond',
-  'Virginia Beach',
-  'Pittsburgh',
-  'Milwaukee',
-  'Columbus',
-];
+// A country-wide search may sweep multiple cities, but ONLY cities inside
+// that same country — never US cities for a Pakistan/Dubai search.
+import { citiesForCountry } from '@/lib/utils/cities';
 
 export interface Schedule {
   locations: string[];
@@ -61,8 +19,8 @@ export interface Schedule {
 
 /**
  * Build the ordered list of locations a search will sweep through.
- * - country-wide searches: start with the whole country (''), then its major
- *   metros — all still inside the country.
+ * - country-wide searches: start with the whole country (''), then that
+ *   country's own major metros — nothing outside the country.
  * - city searches: the one chosen city ONLY. Never other cities.
  */
 export function buildCitySchedule(params: {
@@ -74,7 +32,11 @@ export function buildCitySchedule(params: {
   const primary = params.city?.trim() || '';
 
   if (params.searchMode === 'country' && params.requestedCount >= 10) {
-    return { locations: ['', ...US_CITIES] };
+    // The country's own metros (e.g. Karachi, Lahore, ... for Pakistan).
+    // If the map has no entry for the typed country, treat the whole text as
+    // a single place so we never sweep unrelated (US) cities.
+    const inner = citiesForCountry(params.country);
+    return inner.length > 0 ? { locations: ['', ...inner] } : { locations: [primary || params.country] };
   }
 
   return { locations: [primary] };

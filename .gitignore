@@ -39,6 +39,17 @@ server/data/
 .runtime/
 backups/
 
+# Playwright browsers — downloaded per-machine by 1-INSTALL.BAT
+playwright-browsers/
+
+# Seed database for fresh installs. Intentionally NOT committed: crm.db holds
+# real business leads and bcrypt password hashes, and the GitHub repository this
+# is pushed to is public. Copy seed/crm.db into the clone by hand (or unpack the
+# encrypted bundle) before running 1-INSTALL.BAT -- it is only read when
+# server\data\crm.db does not exist yet.
+seed/*
+!seed/README.md
+
 # local dev logs
 dev-server.log
 dev-server-err.log

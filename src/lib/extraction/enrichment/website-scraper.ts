@@ -34,6 +34,26 @@ const PLACEHOLDER_EMAILS = new Set([
   'hello@example.com', 'namet@example.com',
 ]);
 
+// Hostnames that are themselves placeholders. Website builders and starter
+// templates ship a literal "info@mysite.com" in the footer, which is NOT a real
+// inbox — a live search produced exactly that for a Karachi dental clinic.
+// The local part can be anything, so the DOMAIN is what identifies these.
+const PLACEHOLDER_EMAIL_DOMAINS = new Set([
+  'mysite.com', 'mysite.ws', 'mysite.org', 'mysite.net',
+  'yoursite.com', 'mysite.com.pk', 'example.com', 'example.org', 'example.net',
+  'domain.com', 'email.com', 'yourdomain.com', 'site.com', 'website.com',
+  'business.com', 'company.com', 'mydomain.com', 'test.com',
+  'emailaddress.com', 'yourcompany.com', 'yourwebsite.com',
+]);
+
+// Generic role inboxes that a template uses verbatim. A real small business
+// almost never publishes these on a brand domain.
+const PLACEHOLDER_LOCAL_PARTS = new Set([
+  'your', 'yourname', 'youremail', 'your-email', 'youremailaddress',
+  'email', 'emailaddress', 'email-address', 'name', 'username', 'user',
+  'firstname.lastname', 'first.last', 'abc', 'xyz', 'test', 'testing',
+]);
+
 const FILE_EXT_TLDS = [
   'css', 'js', 'json', 'xml', 'png', 'jpg', 'jpeg', 'gif', 'svg', 'webp',
   'pdf', 'min.css', 'min.js', 'map', 'ico', 'txt', 'html', 'htm',
@@ -41,11 +61,22 @@ const FILE_EXT_TLDS = [
 
 function isJunkEmail(email: string): boolean {
   const lower = email.toLowerCase();
-  const domain = lower.split('@')[1] || '';
+  const [localRaw = '', domain = ''] = lower.split('@');
   if (PLACEHOLDER_EMAILS.has(lower)) return true;
+  if (!domain.includes('.')) return true;
+  if (PLACEHOLDER_EMAIL_DOMAINS.has(domain)) return true;
+  if (PLACEHOLDER_EMAIL_DOMAINS.has(domain.replace(/^www\./, ''))) return true;
+
+  // "info@mysite.com" is caught above; this also catches the "your-email@..." /
+  // "emailaddress@..." style placeholders where the domain itself is real.
+  const local = localRaw.split('+')[0].trim();
+  if (PLACEHOLDER_LOCAL_PARTS.has(local)) return true;
+  if (/^(your|my|placeholder|changeme|example|test)[-_]?(email|name|site|domain|address|account)?[-_]?\d*$/i.test(local)) {
+    return true;
+  }
+
   const tld = domain.split('.').pop() || '';
   if (FILE_EXT_TLDS.includes(tld)) return true;
-  if (!domain.includes('.')) return true;
   return false;
 }
 
@@ -189,6 +220,23 @@ export async function scrapeWebsite(url: string): Promise<ScrapedData> {
     '/about.html',
   ];
 
+  // Deeper pages that often hold team/department contact info omitted from the
+  // homepage/contact page: a directory, team listing, or info page. These are
+  // cheap to fetch and frequently unlock the missing phone/email.
+  const secondaryPages = [
+    '/team',
+    '/our-team',
+    '/team-members',
+    '/directory',
+    '/departments',
+    '/info',
+    '/offices',
+    '/branches',
+    '/locations',
+    '/en/contact',
+    '/get-in-touch',
+  ];
+
   const allPhones: string[] = [];
   const allEmails: string[] = [];
   let instagram: string | null = null;
@@ -218,7 +266,7 @@ export async function scrapeWebsite(url: string): Promise<ScrapedData> {
     allEmails.push(...extractEmailsFromText(html));
     $('a[href^="mailto:"]').each((_i, el) => {
       const email = $(el).attr('href')?.replace('mailto:', '').split('?')[0]?.trim();
-      if (email) allEmails.push(email);
+      if (email && !isJunkEmail(email)) allEmails.push(email);
     });
 
     // Extract social links (check all pages)
@@ -233,6 +281,41 @@ export async function scrapeWebsite(url: string): Promise<ScrapedData> {
     }
 
     await sleep(500);
+  }
+
+  // If the primary pages yielded no phone/email at all, sweep the secondary
+  // pages (team/directory/etc.) before giving up — many small businesses list
+  // their only phone on an "Our Team" or "Office Locations" page.
+  if (allPhones.length === 0 && allEmails.length === 0) {
+    for (const pagePath of secondaryPages) {
+      const pageUrl = `${baseUrl.origin}${pagePath}`;
+      const html = await fetchPage(pageUrl);
+      if (!html) {
+        await sleep(400);
+        continue;
+      }
+
+      const $ = cheerio.load(html);
+      const bodyText = $('body').text();
+      const telLinks = $('a[href^="tel:"]').map((_i, el) => $(el).attr('href')?.replace('tel:', '') || '').get();
+
+      allPhones.push(...extractPhonesFromText(bodyText));
+      allPhones.push(...telLinks.filter((t): t is string => !!t));
+      allEmails.push(...extractEmailsFromText(html));
+      $('a[href^="mailto:"]').each((_i, el) => {
+        const email = $(el).attr('href')?.replace('mailto:', '').split('?')[0]?.trim();
+        if (email && !isJunkEmail(email)) allEmails.push(email);
+      });
+
+      const social = extractSocialLinks($);
+      if (!instagram && social.instagram) instagram = social.instagram;
+      if (!facebook && social.facebook) facebook = social.facebook;
+      if (!linkedin && social.linkedin) linkedin = social.linkedin;
+      if (!contactPerson) contactPerson = extractContactPerson($);
+
+      if (allPhones.length > 0 || allEmails.length > 0) break;
+      await sleep(400);
+    }
   }
 
   // Static fetch found nothing at all — retry the homepage and contact page
@@ -253,7 +336,7 @@ export async function scrapeWebsite(url: string): Promise<ScrapedData> {
       allEmails.push(...extractEmailsFromText(html));
       $('a[href^="mailto:"]').each((_i, el) => {
         const email = $(el).attr('href')?.replace('mailto:', '').split('?')[0]?.trim();
-        if (email) allEmails.push(email);
+        if (email && !isJunkEmail(email)) allEmails.push(email);
       });
 
       const social = extractSocialLinks($);

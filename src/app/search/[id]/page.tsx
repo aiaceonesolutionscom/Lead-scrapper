@@ -20,6 +20,7 @@ import {
   MapPin,
   Globe,
   Download,
+  FileDown,
   Plus,
   RotateCcw,
   XCircle,
@@ -189,8 +190,12 @@ export default function SearchResultsPage() {
         }
       }
 
-      if (!cancelled && status && isRunning(status)) {
-        timer = setTimeout(poll, 3000);
+      // A transient fetch failure (flaky tunnel hop) must not kill the poll
+      // loop: keep polling against the last known status so live updates
+      // resume as soon as the connection recovers.
+      const lastStatus = status ?? prevStatusRef.current;
+      if (!cancelled && lastStatus && isRunning(lastStatus)) {
+        timer = setTimeout(poll, status ? 3000 : 5000);
       }
     }
 
@@ -230,7 +235,7 @@ export default function SearchResultsPage() {
     }
   }
 
-  async function handleExport(format: "csv" | "xlsx") {
+  async function handleExport(format: "csv" | "xlsx" | "pdf") {
     if (!data) return;
     try {
       await downloadPost(
@@ -484,6 +489,10 @@ export default function SearchResultsPage() {
                 <Button variant="outline" size="sm" onClick={() => handleExport("xlsx")}>
                   <Download className="mr-2 h-4 w-4" />
                   Excel
+                </Button>
+                <Button variant="outline" size="sm" onClick={() => handleExport("pdf")}>
+                  <FileDown className="mr-2 h-4 w-4" />
+                  PDF
                 </Button>
                 <Link href="/search/new">
                   <Button size="sm">

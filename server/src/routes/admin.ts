@@ -42,12 +42,12 @@ function countAdmins(): number {
 adminRouter.get(
   '/users',
   asyncHandler(async (_req: AppRequest, res: AppResponse) => {
-    const rows = db.prepare('SELECT id, username, email, password_changed_at, role, enabled, onboarding_seen, created_at, updated_at FROM users ORDER BY created_at ASC').all() as Record<string, unknown>[];
+    const rows = db.prepare('SELECT id, username, email, password_changed_at, role, enabled, onboarding_seen, last_seen_at, created_at, updated_at FROM users ORDER BY created_at ASC').all() as Record<string, unknown>[];
     res.json({ users: rows.map(toAppUser) });
   })
 );
 
-// POST /api/admin/users — create user (email acts as the login identifier)
+// POST /api/admin/users â€” create user (email acts as the login identifier)
 adminRouter.post(
   '/users',
   asyncHandler(async (req: AppRequest, res: AppResponse) => {
@@ -85,7 +85,7 @@ adminRouter.post(
   })
 );
 
-// PUT /api/admin/users/:id — update username/role/enabled (never the password)
+// PUT /api/admin/users/:id â€” update username/role/enabled (never the password)
 adminRouter.put(
   '/users/:id',
   asyncHandler(async (req: AppRequest, res: AppResponse) => {
@@ -187,14 +187,31 @@ adminRouter.delete(
       return sendError(res, 409, 'Cannot delete the last remaining admin');
     }
 
-    db.prepare('DELETE FROM sessions WHERE user_id = ?').run(id);
-    db.prepare('DELETE FROM users WHERE id = ?').run(id);
+    // Delete in a transaction so the FK chain is happy regardless of schema:
+    // search_leads / lead_notes / lead_sources cascade from searches and leads;
+    // sessions, notifications, support_messages and support_threads reference
+    // users directly. Wrapping it all in BEGIN/COMMIT keeps it atomic.
+    db.exec('BEGIN');
+    try {
+      db.prepare('DELETE FROM sessions WHERE user_id = ?').run(id);
+      db.prepare('DELETE FROM notifications WHERE user_id = ?').run(id);
+      db.prepare('DELETE FROM support_threads WHERE user_id = ?').run(id);
+      // searches.created_by -> users has no ON DELETE CASCADE in the original
+      // schema, so drop this user's searches explicitly (their search_leads +
+      // lead_notes + lead_sources cascade away with them).
+      db.prepare('DELETE FROM searches WHERE created_by = ?').run(id);
+      db.prepare('DELETE FROM users WHERE id = ?').run(id);
+      db.exec('COMMIT');
+    } catch (err) {
+      db.exec('ROLLBACK');
+      throw err;
+    }
     logEvent('ADMIN', 'info', `Admin "${req.user?.username}" deleted user "${user.username}"`);
     res.json({ success: true, id });
   })
 );
 
-// GET /api/admin/users/:id/searches — one user's extraction history (admin).
+// GET /api/admin/users/:id/searches â€” one user's extraction history (admin).
 adminRouter.get(
   '/users/:id/searches',
   asyncHandler(async (req: AppRequest, res: AppResponse) => {
@@ -208,14 +225,14 @@ adminRouter.get(
   })
 );
 
-// GET /api/admin/overview — per-user extraction stats + system/imported bucket
+// GET /api/admin/overview â€” per-user extraction stats + system/imported bucket
 adminRouter.get(
   '/overview',
   asyncHandler(async (_req: AppRequest, res: AppResponse) => {
     const users = db
       .prepare(
         `SELECT
-           u.id, u.username, u.email, u.password_changed_at, u.role, u.enabled, u.created_at, u.updated_at,
+           u.id, u.username, u.email, u.password_changed_at, u.role, u.enabled, u.created_at, u.updated_at, u.last_seen_at,
            (SELECT COUNT(*) FROM searches s WHERE s.created_by = u.id) AS total_searches,
            (SELECT COUNT(*) FROM search_leads sl JOIN searches s ON s.id = sl.search_id AND s.created_by = u.id) AS leads_extracted,
            (SELECT MAX(s.created_at) FROM searches s WHERE s.created_by = u.id) AS last_search_at
@@ -239,6 +256,7 @@ adminRouter.get(
         role: String(u.role),
         enabled: Boolean(u.enabled),
         password_changed_at: (u.password_changed_at as string) ?? null,
+        last_seen_at: (u.last_seen_at as string) ?? null,
         created_at: String(u.created_at),
         updated_at: String(u.updated_at),
         total_searches: Number(u.total_searches),
@@ -259,7 +277,7 @@ adminRouter.get(
   })
 );
 
-// GET /api/admin/events?level=&tail= — app events (errors, logs)
+// GET /api/admin/events?level=&tail= â€” app events (errors, logs)
 adminRouter.get(
   '/events',
   asyncHandler(async (req: AppRequest, res: AppResponse) => {
@@ -281,7 +299,7 @@ adminRouter.get(
   })
 );
 
-// DELETE /api/admin/events — purge events older than retention (or all)
+// DELETE /api/admin/events â€” purge events older than retention (or all)
 adminRouter.delete(
   '/events',
   asyncHandler(async (req: AppRequest, res: AppResponse) => {
@@ -310,6 +328,8 @@ adminRouter.get(
     const logsDir = resolve(config.repoRoot, 'logs');
     const npmCacheDir = resolve(config.repoRoot, '.runtime', 'npm-cache');
     const backupsDir = resolve(config.repoRoot, 'backups');
+    // Real backup location used by scripts/backup-db.ts
+    const backupRoot = process.env.BACKUP_ROOT ? resolve(process.env.BACKUP_ROOT) : resolve(config.repoRoot, 'backups');
 
     let diskFree: { free_gb: number; total_gb: number } | null = null;
     try {
@@ -319,7 +339,7 @@ adminRouter.get(
         total_gb: Math.round((s.blocks * s.bsize) / 1024 / 1024 / 1024 * 10) / 10,
       };
     } catch {
-      // statfs unsupported on this platform — leave null
+      // statfs unsupported on this platform â€” leave null
     }
 
     res.json({
@@ -354,6 +374,75 @@ adminRouter.get(
         npm_cache_mb: Math.round(dirSizeBytes(npmCacheDir) / 1024 / 1024 * 10) / 10,
         backups_mb: Math.round(dirSizeBytes(backupsDir) / 1024 / 1024 * 10) / 10,
       },
+      backup: (() => {
+        try {
+          // Read the real backup location (scripts/backup-db.ts writes
+          // D:\CRM Backups\leadlead\backup-YYYY-MM-DD-HH-mm\crm.db).
+          if (!existsSync(backupRoot)) return { status: 'no_backups', last_backup: null, backup_count: 0, total_size_mb: 0 };
+          const folders = readdirSync(backupRoot).filter((f) => /^backup-\d{4}-\d{2}-\d{2}/.test(f));
+          if (folders.length === 0) return { status: 'no_backups', last_backup: null, backup_count: 0, total_size_mb: 0 };
+          // Each backup is a folder containing crm.db; pick the newest by folder mtime
+          let newest: { name: string; mtime: Date; full: string } | null = null;
+          let totalBytes = 0;
+          for (const folder of folders) {
+            const fullFolder = join(backupRoot, folder);
+            const dbFile = join(fullFolder, 'crm.db');
+            if (existsSync(dbFile)) totalBytes += statSync(dbFile).size;
+            const st = statSync(fullFolder);
+            if (!newest || st.mtime > newest.mtime) {
+              newest = { name: folder, mtime: st.mtime, full: fullFolder };
+            }
+          }
+          return {
+            status: 'ok',
+            last_backup: newest?.mtime.toISOString() || null,
+            last_backup_name: newest?.name || null,
+            backup_count: folders.length,
+            total_size_mb: Math.round(totalBytes / 1024 / 1024 * 10) / 10,
+            location: backupRoot,
+          };
+        } catch {
+          return { status: 'error', last_backup: null, backup_count: 0, total_size_mb: 0, location: backupRoot };
+        }
+      })(),
     });
+  })
+);
+
+// POST /api/admin/backup â€” trigger a manual database backup (VACUUM INTO a
+// consistent snapshot in the same location the daily script uses).
+adminRouter.post(
+  '/backup',
+  asyncHandler(async (req: AppRequest, res: AppResponse) => {
+    const dbFile = config.dbPath;
+    if (!existsSync(dbFile)) {
+      return sendError(res, 404, 'Database file not found');
+    }
+    const backupRoot = process.env.BACKUP_ROOT ? resolve(process.env.BACKUP_ROOT) : resolve(config.repoRoot, 'backups');
+    try {
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 16);
+      const folder = join(backupRoot, `backup-${timestamp}`);
+      const { mkdirSync } = await import('node:fs');
+      mkdirSync(folder, { recursive: true });
+      const dest = join(folder, 'crm.db');
+
+      // Use VACUUM INTO like scripts/backup-db.ts so the snapshot is always
+      // consistent (safe while the backend is live / in WAL mode).
+      const { DatabaseSync } = await import('node:sqlite');
+      const source = new DatabaseSync(dbFile, { readOnly: true });
+      try {
+        source.exec(`VACUUM INTO '${dest.replace(/'/g, "''")}';`);
+      } finally {
+        source.close();
+      }
+
+      const size = statSync(dest).size;
+      logEvent('ADMIN', 'info', `Manual backup created: ${folder} (${Math.round(size / 1024)}KB) by "${req.user?.username}"`);
+      res.json({ success: true, name: folder, size_bytes: size });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Backup failed';
+      logEvent('ADMIN', 'error', `Manual backup failed: ${msg}`);
+      sendError(res, 500, msg);
+    }
   })
 );

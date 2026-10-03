@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import * as XLSX from 'xlsx';
 import Papa from 'papaparse';
+import { jsPDF } from 'jspdf';
 import { asyncHandler, sendError, type AppRequest, type AppResponse } from '../middleware';
 import { db, toLead } from '../db';
 import { getMapUrl } from '@/lib/utils';
@@ -68,6 +69,192 @@ function toClickableCsvRow(row: ExportData): Record<string, unknown> {
   return out;
 }
 
+function hexToRgb(hex: string): [number, number, number] {
+  const h = hex.replace('#', '');
+  return [
+    parseInt(h.slice(0, 2), 16),
+    parseInt(h.slice(2, 4), 16),
+    parseInt(h.slice(4, 6), 16),
+  ];
+}
+
+const ink = hexToRgb('#334155');
+const muted = hexToRgb('#64748b');
+const subtle = hexToRgb('#e2e8f0');
+const brand = hexToRgb('#4f46e5');
+const headBg = hexToRgb('#f1f5f9');
+const striped = hexToRgb('#f8fafc');
+const green = hexToRgb('#15803d');
+const PDF_FONT = 'helvetica';
+
+// Printable column set. Widths are weights normalized to the page at runtime so
+// they always fill the content area; long URLs wrap (max 2 lines) instead of
+// breaking the layout, keeping each row clean and scannable.
+const PDF_COLS: { header: string; key: keyof ExportData; weight: number; maxLines: number }[] = [
+  { header: 'Business', key: 'business_name', weight: 0.145, maxLines: 2 },
+  { header: 'Contact', key: 'contact_person', weight: 0.05, maxLines: 2 },
+  { header: 'Phone', key: 'phone', weight: 0.10, maxLines: 1 },
+  { header: 'Email', key: 'email', weight: 0.09, maxLines: 2 },
+  { header: 'Website', key: 'website', weight: 0.075, maxLines: 2 },
+  { header: 'Instagram', key: 'instagram', weight: 0.07, maxLines: 2 },
+  { header: 'Facebook', key: 'facebook', weight: 0.07, maxLines: 2 },
+  { header: 'LinkedIn', key: 'linkedin', weight: 0.07, maxLines: 2 },
+  { header: 'Address', key: 'address', weight: 0.075, maxLines: 2 },
+  { header: 'City', key: 'city', weight: 0.04, maxLines: 1 },
+  { header: 'Country', key: 'country', weight: 0.045, maxLines: 1 },
+  { header: 'Category', key: 'category', weight: 0.048, maxLines: 2 },
+  { header: 'Status', key: 'status', weight: 0.038, maxLines: 1 },
+  { header: 'Verified', key: 'verified', weight: 0.045, maxLines: 1 },
+  { header: 'Date', key: 'created_date', weight: 0.04, maxLines: 1 },
+];
+
+// Draws text inside a fixed-width box: until its width fits the box it is
+// re-rendered at a smaller font size. When even the smallest size won't fit it
+// first tries word-wrapping onto more lines; if a single unbreakable word is
+// still too wide it is truncated with "…" so it never bleeds into the next
+// column.
+const drawFitText = (doc: jsPDF, text: string, x: number, yPos: number, maxWidth: number, startSize: number): void => {
+  let size = startSize;
+  doc.setFontSize(size);
+  while (size > 5 && doc.getTextWidth(text) > maxWidth) {
+    size -= 0.5;
+    doc.setFontSize(size);
+  }
+  let t = text;
+  if (doc.getTextWidth(t) > maxWidth) {
+    const wrapped = doc.splitTextToSize(t, maxWidth) as string[];
+    if (wrapped.length > 1) {
+      wrapped.slice(0, 3).forEach((ln, li) => {
+        if (ln) doc.text(ln, x, yPos + li * 5);
+      });
+      return;
+    }
+    while (t.length > 1 && doc.getTextWidth(t + '…') > maxWidth) t = t.slice(0, -1);
+    t += '…';
+  }
+  doc.text(t, x, yPos);
+};
+
+function buildLeadsPdf(rows: ExportData[]): ArrayBuffer {
+  const doc = new jsPDF({ orientation: 'landscape', unit: 'pt', format: 'a4' });
+  const pageW = doc.internal.pageSize.getWidth();
+  const pageH = doc.internal.pageSize.getHeight();
+  const margin = 36;
+  const contentW = pageW - margin * 2;
+
+  const totalWeight = PDF_COLS.reduce((s, c) => s + c.weight, 0);
+  const widths = PDF_COLS.map((c) => (c.weight / totalWeight) * contentW);
+
+  const lineH = 9;
+  const cellPad = 3;
+
+  let y = 0;
+  let page = 1;
+
+  const footer = () => {
+    doc.setFontSize(7.5);
+    doc.setFont(PDF_FONT, 'normal');
+    doc.setTextColor(...muted);
+    doc.text('© 2026 MJ Labs · Built by Muneeb Jawwad · Lead Extractor + CRM', margin, pageH - 18);
+    doc.text(`Page ${page}`, pageW - margin, pageH - 18, { align: 'right' });
+  };
+
+  const drawColumnHeader = () => {
+    const headerH = 20;
+    doc.setFillColor(...headBg);
+    doc.rect(margin, y, contentW, headerH, 'F');
+    let cx = margin;
+    PDF_COLS.forEach((c, i) => {
+      doc.setFont(PDF_FONT, 'bold');
+      doc.setTextColor(...ink);
+      drawFitText(doc, c.header.toUpperCase(), cx + 4, y + 13, widths[i] - 8, 7.5);
+      cx += widths[i];
+    });
+    doc.setDrawColor(...subtle);
+    doc.line(margin, y + headerH, margin + contentW, y + headerH);
+    y += headerH;
+  };
+
+  const ensureSpace = (needed: number) => {
+    if (y + needed > pageH - 32) {
+      doc.addPage();
+      page += 1;
+      footer();
+      y = margin + 4;
+      drawColumnHeader();
+    }
+  };
+
+  // ---- Page 1 brand band ----
+  doc.setFillColor(...brand);
+  doc.roundedRect(margin, margin, contentW, 42, 6, 6, 'F');
+  doc.setFont(PDF_FONT, 'bold');
+  doc.setFontSize(14);
+  doc.setTextColor(255, 255, 255);
+  doc.text('LEADS EXPORT', margin + 14, margin + 26);
+  doc.setFont(PDF_FONT, 'normal');
+  doc.setFontSize(8.5);
+  doc.text(`Generated ${new Date().toLocaleString()}`, pageW - margin, margin + 18, { align: 'right' });
+  doc.text(`${rows.length} lead${rows.length === 1 ? '' : 's'} · ${rows.filter((r) => r.verified === 'Yes').length} verified`, pageW - margin, margin + 30, { align: 'right' });
+
+  y = margin + 42 + 12;
+  footer();
+  drawColumnHeader();
+
+  doc.setFontSize(8);
+  for (const [ri, row] of rows.entries()) {
+    const wrapped: string[][] = PDF_COLS.map((c) => {
+      const raw = String(row[c.key] ?? '');
+      if (raw.length === 0) return [''];
+      const lines = doc.splitTextToSize(raw, widths[PDF_COLS.indexOf(c)] - 9) as string[];
+      if (c.maxLines === 1 && lines.length > 1) {
+        return [lines[0]];
+      }
+      if (lines.length > c.maxLines) {
+        const capped = lines.slice(0, c.maxLines);
+        capped[capped.length - 1] += '…';
+        return capped;
+      }
+      return lines;
+    });
+    const rowH = Math.max(...wrapped.map((l) => l.length)) * lineH + cellPad * 2;
+
+    ensureSpace(rowH);
+    if (ri % 2 === 1) {
+      doc.setFillColor(...striped);
+      doc.rect(margin, y, contentW, rowH, 'F');
+    }
+
+    wrapped.forEach((lines, ci) => {
+      const x0 = margin + widths.slice(0, ci).reduce((a, b) => a + b, 0) + 4;
+      const avail = widths[ci] - 8;
+      lines.forEach((ln, li) => {
+        const key = PDF_COLS[ci].key;
+        doc.setFont(PDF_FONT, key === 'status' ? 'bold' : 'normal');
+        if (key === 'verified' && ln === 'Yes') {
+          doc.setFont(PDF_FONT, 'bold');
+          doc.setTextColor(...green);
+        } else {
+          doc.setTextColor(...ink);
+        }
+        drawFitText(doc, ln, x0, y + cellPad + lineH * li + 7, avail, 8);
+      });
+    });
+
+    doc.setDrawColor(...subtle);
+    let sx = margin;
+    widths.forEach((w) => {
+      sx += w;
+      doc.line(sx, y, sx, y + rowH);
+    });
+    doc.line(margin, y + rowH, margin + contentW, y + rowH);
+    y += rowH;
+  }
+
+  footer();
+  return doc.output('arraybuffer');
+}
+
 function collectLeads(req: AppRequest): Lead[] {
   const body = req.body || {};
   const uid = req.user?.id ?? '';
@@ -110,8 +297,8 @@ exportRouter.post(
     const body = (req.body || {}) as { format?: unknown; leadIds?: unknown; searchId?: unknown };
     const { format } = body;
 
-    if (format !== 'csv' && format !== 'xlsx') {
-      return sendError(res, 400, 'format must be "csv" or "xlsx"');
+    if (format !== 'csv' && format !== 'xlsx' && format !== 'pdf') {
+      return sendError(res, 400, 'format must be "csv", "xlsx" or "pdf"');
     }
     if (!body.leadIds && !body.searchId) {
       return sendError(res, 400, 'Either leadIds or searchId must be provided');
@@ -134,6 +321,13 @@ exportRouter.post(
       res.setHeader('Content-Type', 'text/csv; charset=utf-8');
       res.setHeader('Content-Disposition', `attachment; filename="leads-export-${Date.now()}.csv"`);
       return res.send(BOM + csv);
+    }
+
+    if (format === 'pdf') {
+      const buffer = buildLeadsPdf(exportData);
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `attachment; filename="leads-export-${Date.now()}.pdf"`);
+      return res.send(Buffer.from(buffer));
     }
 
     // XLSX with real, clickable hyperlinks + readability features:

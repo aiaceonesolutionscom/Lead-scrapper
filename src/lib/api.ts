@@ -25,9 +25,83 @@ export interface ApiOptions {
   headers?: Record<string, string>;
 }
 
-async function parseError(res: Response): Promise<string> {
+const MAX_RETRIES = 3;
+const RETRY_BASE_MS = 400;
+
+// 502/503/504 = Vercel proxy couldn't reach the tunnel; 530 = Cloudflare's
+// transient "tunnel reconnecting" error page. All four are hop-level blips on
+// the flaky CGNAT link and worth a retry.
+const RETRYABLE_STATUS = new Set([502, 503, 504, 530]);
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function randomJitter(): number {
+  return Math.floor(Math.random() * 200);
+}
+
+/**
+ * The Vercel proxy → Cloudflare quick tunnel hop is on a flaky 5G NAT, so a
+ * small share of requests fail with 502/503/504/530 or "Failed to fetch" even
+ * though the backend is fine. Worse, the proxy streams the tunnel response, so
+ * a drop MID-BODY (after status 200) surfaces only when the body is read — never
+ * as a fetch() rejection. To catch those both, the body is read inside the
+ * retry loop; a mid-stream drop throws in the reader and we retry the whole
+ * request so the blip is invisible to the user.
+ */
+async function fetchWithRetryCore<T>(
+  url: string,
+  init: RequestInit,
+  retries: number,
+  read: (res: Response) => Promise<T>
+): Promise<{ status: number; headers: Headers; body: T }> {
+  let res: Response;
   try {
-    const data = await res.json();
+    res = await fetch(url, init);
+  } catch (err) {
+    if (retries <= 0) throw err;
+    await sleep(RETRY_BASE_MS * (MAX_RETRIES - retries + 1) + randomJitter());
+    return fetchWithRetryCore(url, init, retries - 1, read);
+  }
+
+  if (retries > 0 && RETRYABLE_STATUS.has(res.status)) {
+    await sleep(RETRY_BASE_MS * (MAX_RETRIES - retries + 1) + randomJitter());
+    return fetchWithRetryCore(url, init, retries - 1, read);
+  }
+
+  try {
+    return { status: res.status, headers: res.headers, body: await read(res) };
+  } catch {
+    // Mid-stream tunnel drop (ERR_CONTENT_DECODING_FAILED / aborted body) on an
+    // otherwise-good 200 — retry the whole request so the blip is invisible.
+    if (retries <= 0) throw new Error("Failed to fetch");
+    await sleep(RETRY_BASE_MS * (MAX_RETRIES - retries + 1) + randomJitter());
+    return fetchWithRetryCore(url, init, retries - 1, read);
+  }
+}
+
+const readText = (res: Response): Promise<string> => res.text();
+const readBlob = (res: Response): Promise<Blob> => res.blob();
+
+interface BufferedResponse {
+  status: number;
+  headers: Headers;
+  text: string;
+}
+
+async function fetchBuffered(
+  url: string,
+  init: RequestInit,
+  retries: number
+): Promise<BufferedResponse> {
+  const { status, headers, body } = await fetchWithRetryCore(url, init, retries, readText);
+  return { status, headers, text: body };
+}
+
+async function parseError(res: BufferedResponse): Promise<string> {
+  try {
+    const data = JSON.parse(res.text) as { error?: string; message?: string };
     return data?.error || data?.message || `Request failed (${res.status})`;
   } catch {
     return `Request failed (${res.status})`;
@@ -50,35 +124,47 @@ export async function request<T = unknown>(
     if (qs) url += `?${qs}`;
   }
 
-  const res = await fetch(url, {
-    method,
-    credentials: "include",
-    headers: {
-      ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
-      ...headers,
+  const buffered = await fetchBuffered(
+    url,
+    {
+      method,
+      credentials: "include",
+      headers: {
+        ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
+        ...headers,
+      },
+      body: body !== undefined ? JSON.stringify(body) : undefined,
     },
-    body: body !== undefined ? JSON.stringify(body) : undefined,
-  });
+    MAX_RETRIES
+  );
 
-  if (res.status === 401) {
+  if (buffered.status === 401) {
     // Not logged in / session expired → send the user to login, but prefer the
     // server's own message (e.g. "Invalid email or password") when it has one.
-    const serverMsg = await parseError(res).catch(() => "Not authenticated");
+    const serverMsg = parseError(buffered).catch(() => "Not authenticated");
     if (typeof window !== "undefined" && !window.location.pathname.startsWith("/login")) {
       const redirect = encodeURIComponent(
         window.location.pathname + window.location.search
       );
       window.location.href = `/login?next=${redirect}`;
     }
-    throw new ApiError(401, serverMsg);
+    throw new ApiError(401, await serverMsg);
   }
 
-  if (!res.ok) {
-    throw new ApiError(res.status, await parseError(res));
+  if (buffered.status >= 400) {
+    // Non-2xx status — the request actually reached a backend (or the proxy's
+    // "Upstream unreachable" answer); surface its real message.
+    throw new ApiError(buffered.status, await parseError(buffered));
   }
 
-  const ct = res.headers.get("content-type") || "";
-  if (ct.includes("application/json")) return (await res.json()) as T;
+  const ct = buffered.headers.get("content-type") || "";
+  if (ct.includes("application/json")) {
+    try {
+      return JSON.parse(buffered.text) as T;
+    } catch {
+      throw new ApiError(buffered.status, "Invalid server response");
+    }
+  }
   return undefined as T;
 }
 
@@ -97,20 +183,26 @@ export const api = {
 /** Download a blob from a POST endpoint (exports). */
 export async function downloadPost(
   path: string,
-  body: unknown,
+  payload: unknown,
   filename: string
 ): Promise<void> {
-  const res = await fetch(`${API_PREFIX}${path}`, {
-    method: "POST",
-    credentials: "include",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    const msg = await parseError(res).catch(() => `Request failed (${res.status})`);
-    throw new ApiError(res.status, msg);
+  // Blob download: CSV/PDF/XLSX are binary-ish payloads, so buffer with
+  // res.blob() inside the retry loop (mid-stream drops get retried).
+  const { status, body: blob } = await fetchWithRetryCore(
+    `${API_PREFIX}${path}`,
+    {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+    MAX_RETRIES,
+    readBlob
+  );
+  if (status >= 400) {
+    const msg = await parseError({ status, headers: new Headers(), text: "" });
+    throw new ApiError(status, msg);
   }
-  const blob = await res.blob();
   const url = window.URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
@@ -129,6 +221,7 @@ export interface AuthUser {
   enabled: boolean;
   onboarding_seen: boolean;
   password_changed_at: string | null;
+  last_seen_at?: string | null;
   created_at: string;
 }
 

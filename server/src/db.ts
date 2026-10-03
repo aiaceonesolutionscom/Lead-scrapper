@@ -47,6 +47,9 @@ db.exec(schema);
   if (!userCols.some((c) => c.name === 'onboarding_seen')) {
     db.exec("ALTER TABLE users ADD COLUMN onboarding_seen INTEGER NOT NULL DEFAULT 0");
   }
+  if (!userCols.some((c) => c.name === 'last_seen_at')) {
+    db.exec('ALTER TABLE users ADD COLUMN last_seen_at TEXT');
+  }
   db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email) WHERE email IS NOT NULL');
   db.exec('UPDATE users SET password_changed_at = created_at WHERE password_changed_at IS NULL');
 }

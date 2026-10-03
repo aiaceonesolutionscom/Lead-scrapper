@@ -1,5 +1,7 @@
 import { withPage } from '../browser';
-import { isCredibleWebsiteMatch } from '@/lib/utils';
+import { isCredibleWebsiteMatch, distinctiveBusinessTokens } from '@/lib/utils';
+import { countryNameToISO2 } from '@/lib/utils/countries';
+import { validatePhone } from '@/lib/utils/phone';
 
 interface SearchFallbackResult {
   phone?: string;
@@ -126,10 +128,14 @@ function extractSocialUrls(text: string): { instagram?: string; facebook?: strin
 }
 
 // A social URL picked out of a shared search-results page mentions MANY
-// companies in one view. Only accept it when its handle/path overlaps the
-// business we're actually enriching — otherwise it's a cross-company leak
-// (e.g. a salt dealer ending up with facebook.com/oldworldsnow).
-function socialMatchesBusiness(
+// companies in one view. Only accept it when its handle/path strongly overlaps
+// the business we're actually enriching — otherwise it's a cross-company leak
+// (e.g. a salt dealer ending up with facebook.com/oldworldsnow, or a Karachi
+// "Regent Banquet" with instagram.com/hongkongregent — a foreign hotel brand
+// that shares one generic word). Distinctive (category-stripped) tokens must
+// match, and a single matched token is only OK when the slug IS basically that
+// word — not when a foreign word sits alongside it (like "hongkong"+"regent").
+export function socialMatchesBusiness(
   socialUrl: string | undefined,
   businessName: string,
   websiteDomain?: string
@@ -145,20 +151,62 @@ function socialMatchesBusiness(
   if (!slug) return false;
   if (/^profile\.php/i.test(slug) || /^id=\d+/.test(slug) || /^\d{6,}$/.test(slug)) return false;
 
-  const tokens: string[] = businessName
-    .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, ' ')
-    .split(/\s+/)
-    .filter((t) => t.length >= 5);
+  const tokens: string[] = distinctiveBusinessTokens(businessName);
   if (websiteDomain) {
     tokens.push(websiteDomain.replace(/^www\./, '').split('.')[0]);
   }
   const normalizedSlug = slug.replace(/[-_]/g, '');
-  return tokens.some((t) => {
+  const matched = tokens.filter((t) => {
     const n = t.replace(/[-_]/g, '');
     if (!n) return false;
     return normalizedSlug.includes(n) || n.includes(normalizedSlug);
   });
+
+  if (matched.length === 0) return false;
+  if (matched.length >= 2) return true;
+
+  // Single matched token: the slug must essentially BE that word (a trailing
+  // pure-numeric suffix like -pk / -1 is fine). An extra foreign word in the
+  // slug ("hongkong"+"regent") means it's a different company's page.
+  const token = matched[0].replace(/[-_]/g, '');
+  const rest = normalizedSlug.startsWith(token)
+    ? normalizedSlug.slice(token.length).replace(/^[-_]+/, '')
+    : normalizedSlug.endsWith(token)
+      ? normalizedSlug.slice(0, normalizedSlug.length - token.length).replace(/[-_]+$/, '')
+      : normalizedSlug.replace(token, '');
+  if (rest.length === 0) return true;
+  return /^[0-9]+$/.test(rest);
+}
+
+// A phone is acceptable for THIS business only when it passes the library
+// check AND belongs to the business's country AND is not an implausibly long
+// national run (libphonenumber marks 12-digit "+92 774 056 383 985" valid, but
+// real PK numbers are <=11 national digits).
+function qualifiesPhone(raw: string, countryCode?: string | null): boolean {
+  const trimmed = raw.trim();
+  const digits = trimmed.replace(/\D/g, '');
+  if (digits.length < 7 || digits.length > 15) return false;
+  const hasSeparator = /[()\s.-]/.test(trimmed);
+  if (!hasSeparator && digits.length >= 12) return false;
+  if (trimmed.startsWith('+') && digits.length > 12) return false;
+  if (/(\d)\1{4}/.test(digits)) return false;
+  try {
+    const p = validatePhone(trimmed, countryCode || undefined);
+    if (!p.valid) return false;
+    if (p.countryCode && countryCode && p.countryCode !== countryCode) return false;
+    if (((p.nationalNumber || '').length) > 11) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function domainOf(url: string): string | null {
+  try {
+    return new URL(url).hostname.replace(/^www\./, '').toLowerCase();
+  } catch {
+    return null;
+  }
 }
 
 const SKIP_DOMAINS = [
@@ -229,7 +277,8 @@ export async function searchGoogleForBusiness(
   businessName: string,
   city: string,
   country: string,
-  missingFields: string[]
+  missingFields: string[],
+  shouldAbort?: () => Promise<boolean>
 ): Promise<SearchFallbackResult> {
   const result: SearchFallbackResult = {};
   let websiteDomain: string | undefined;
@@ -252,6 +301,7 @@ export async function searchGoogleForBusiness(
 
   await withPage(async (page) => {
     for (const { query, field } of probes) {
+      if (shouldAbort && (await shouldAbort())) return;
       if (result[field]) continue;
       const q = buildQuery(businessName, city, country, query);
 
@@ -269,32 +319,75 @@ export async function searchGoogleForBusiness(
               .filter(Boolean);
           }).catch(() => [] as string[])) as string[];
           const links = rawLinks.map(unwrapBingRedirect);
+          const candidates: string[] = [];
+          const seenDomains = new Set<string>();
           for (const href of links) {
-            if (isGoodWebsite(href)) {
-              result.website = href;
-              try {
-                websiteDomain = new URL(href).hostname.replace(/^www\./, '').toLowerCase();
-              } catch { /* ignore */ }
-              break;
-            }
+            if (!isGoodWebsite(href)) continue;
+            const dom = domainOf(href);
+            if (!dom || seenDomains.has(dom)) continue;
+            seenDomains.add(dom);
+            candidates.push(href);
+            if (candidates.length >= 3) break;
           }
-          if (!result.website) {
+          if (candidates.length === 0) {
             const rawFallback = (await page.evaluate(() => {
               return Array.from(document.querySelectorAll('a[href^="http"]'))
                 .map((a) => (a as HTMLAnchorElement).href);
             }).catch(() => [] as string[])) as string[];
-            const fallback = rawFallback
-              .map(unwrapBingRedirect)
-              .filter((h) => !/bing\.com|microsoft|msn/i.test(h));
-            for (const href of fallback) {
-              if (isGoodWebsite(href)) {
-                result.website = href;
-                try {
-                  websiteDomain = new URL(href).hostname.replace(/^www\./, '').toLowerCase();
-                } catch { /* ignore */ }
-                break;
-              }
+            for (const href of rawFallback.map(unwrapBingRedirect)) {
+              if (!isGoodWebsite(href) || /bing\.com|microsoft|msn/i.test(href)) continue;
+              const dom = domainOf(href);
+              if (!dom || seenDomains.has(dom)) continue;
+              seenDomains.add(dom);
+              candidates.push(href);
+              if (candidates.length >= 3) break;
             }
+          }
+
+          const iso2 = countryNameToISO2(country) || undefined;
+          const geo = { city, country, countryCode: iso2 };
+
+          // Best-effort display website (enrichment only stores it when the
+          // credibility check passes, so a lookalike domain never sticks).
+          if (candidates.length > 0) {
+            result.website = candidates[0];
+            const dom = domainOf(candidates[0]);
+            if (dom) websiteDomain = dom;
+          }
+
+          // Visit ONLY credible candidate sites — the business's OWN site is
+          // the only trusted source for phone/email/socials. Stop as soon as a
+          // phone that validates AND belongs to the business's country shows
+          // up; otherwise keep trying the next credible candidate.
+          for (const url of candidates) {
+            if (shouldAbort && (await shouldAbort())) break;
+            if (!isCredibleWebsiteMatch(url, businessName, geo)) continue;
+            try {
+              await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 25000 });
+              await page.waitForTimeout(1200);
+              const siteText = (await page.evaluate(() => {
+                return document.body ? (document.body as HTMLElement).innerText : '';
+              }).catch(() => '')) as string;
+
+              if (!result.email) {
+                const siteEmails = extractEmails(siteText);
+                if (siteEmails.length > 0) result.email = siteEmails[0];
+              }
+              if (!result.phone) {
+                const sitePhones = extractPhones(siteText);
+                const good = sitePhones.find((p) => qualifiesPhone(p, iso2));
+                if (good) result.phone = good;
+              }
+              const urlDomain = domainOf(url) || undefined;
+              const siteSocial = extractSocialUrls(siteText);
+              if (siteSocial.instagram && socialMatchesBusiness(siteSocial.instagram, businessName, urlDomain)) result.instagram = siteSocial.instagram;
+              if (siteSocial.facebook && socialMatchesBusiness(siteSocial.facebook, businessName, urlDomain)) result.facebook = siteSocial.facebook;
+              if (siteSocial.linkedin && socialMatchesBusiness(siteSocial.linkedin, businessName, urlDomain)) result.linkedin = siteSocial.linkedin;
+              if (result.phone) break;
+            } catch {
+              // website visit failed — keep what search discovered, try next
+            }
+            await sleep(350);
           }
         } else {
           const text = (await page.evaluate(() => {
@@ -320,38 +413,6 @@ export async function searchGoogleForBusiness(
       }
 
       await sleep(350);
-    }
-
-    // Visit the business's own website — the ONLY source we trust for email
-    // and phone, plus the authoritative social links. Only harvest when the
-    // domain plausibly matches the business name: a mismatched site (e.g. a
-    // Google-listed record-store domain on the wrong listing) would otherwise
-    // feed us another company's phone/email/socials.
-    if (result.website && isCredibleWebsiteMatch(result.website, businessName)) {
-      try {
-        await page.goto(result.website, { waitUntil: 'domcontentloaded', timeout: 25000 });
-        await page.waitForTimeout(1200);
-        const siteText = (await page.evaluate(() => {
-          return document.body ? (document.body as HTMLElement).innerText : '';
-        }).catch(() => '')) as string;
-
-        if (!result.email) {
-          const siteEmails = extractEmails(siteText);
-          if (siteEmails.length > 0) result.email = siteEmails[0];
-        }
-        if (!result.phone) {
-          const sitePhones = extractPhones(siteText);
-          if (sitePhones.length > 0) result.phone = sitePhones[0];
-        }
-        const siteSocial = extractSocialUrls(siteText);
-        // The business's OWN site socials win over search-snippet guesses —
-        // snippet socials only fill in when the site doesn't list them.
-        result.instagram = siteSocial.instagram || result.instagram;
-        result.facebook = siteSocial.facebook || result.facebook;
-        result.linkedin = siteSocial.linkedin || result.linkedin;
-      } catch {
-        // website visit failed — keep what search discovered
-      }
     }
   });
 

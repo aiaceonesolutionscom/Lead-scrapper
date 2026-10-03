@@ -7,6 +7,49 @@ import { isIllFormedBusiness } from './filters';
 import { resetBrowserSession } from '../browser';
 import { normalizeString, extractDomain } from '@/lib/utils';
 import { hasJunkUrl } from '../relevance';
+import { countryNameToISO2 } from '@/lib/utils/countries';
+
+/**
+ * Check whether a business belongs to the target country. Returns true when
+ * the country cannot be determined (fail-open) so legitimate leads are never
+ * wrongly dropped — only clearly-mismatched ones are filtered.
+ */
+function isCountryMatch(business: DiscoveryBusiness, targetCountry: string): boolean {
+  const targetISO2 = countryNameToISO2(targetCountry);
+  if (!targetISO2) return true; // unknown country, accept everything
+
+  // 1. country_code (ISO2) from Google Maps detail panel or OSM tag — strongest signal
+  if (business.country_code) {
+    return business.country_code.toUpperCase() === targetISO2;
+  }
+
+  // 2. Full country name from discovery source
+  if (business.country) {
+    const srcISO2 = countryNameToISO2(business.country);
+    if (srcISO2) return srcISO2 === targetISO2;
+  }
+
+  // 3. Phone country code — a +92 number is Pakistani even if country field is blank
+  if (business.phone) {
+    const phoneDigits = business.phone.replace(/\D/g, '');
+    if (phoneDigits.startsWith('92') && targetISO2 === 'PK') return true;
+    if (phoneDigits.startsWith('880') && targetISO2 === 'BD') return true;
+    if (phoneDigits.startsWith('91') && targetISO2 === 'IN') return true;
+    // Add more as needed; fail-open for unknown codes
+  }
+
+  // 4. City heuristic: well-known cities that unambiguously belong to one country
+  if (business.city) {
+    const c = business.city.toLowerCase();
+    const pakCities = new Set(['karachi', 'lahore', 'faisalabad', 'rawalpindi', 'islamabad', 'multan', 'hyderabad', 'gujranwala', 'peshawar', 'quetta', 'sialkot']);
+    const bdCities = new Set(['dhaka', 'chittagong', 'khulna', 'rajshahi', 'sylhet', 'barisal', 'rangpur', 'cumilla']);
+    if (pakCities.has(c)) return targetISO2 === 'PK';
+    if (bdCities.has(c)) return targetISO2 === 'BD';
+  }
+
+  // 5. No signals at all — fail-open (accept)
+  return true;
+}
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -60,14 +103,24 @@ export interface DiscoveryOptions {
   country: string;
   limit: number;
   round?: number;
+  /** When this resolves truthy, discovery stops at the next safe boundary
+   * and returns whatever it already collected (cancellation halts the
+   * current location WITHOUT waiting for the full crawl). */
+  shouldAbort?: () => Promise<boolean>;
 }
 
 export async function discoverBusinesses(
   options: DiscoveryOptions
 ): Promise<{ businesses: DiscoveryBusiness[]; totalCount: number }> {
-  const { keyword, city, country, limit, round = 0 } = options;
+  const { keyword, city, country, limit, round = 0, shouldAbort } = options;
 
   console.log(`[Discovery] Starting discovery for "${keyword}" in ${city || country} (limit: ${limit}, round: ${round})`);
+
+  const aborted = async () => (shouldAbort ? await shouldAbort() : false);
+  const earlyReturn = (): { businesses: DiscoveryBusiness[]; totalCount: number } => {
+    console.log(`[Discovery] Cancelled — returning ${allBusinesses.length} businesses (before dedup)`);
+    return { businesses: [], totalCount: 0 };
+  };
 
   const allBusinesses: DiscoveryBusiness[] = [];
 
@@ -89,16 +142,19 @@ export async function discoverBusinesses(
     gmResults = await discoverFromGoogleMaps(keyword, city || '', country, limit, {
       headless: true,
       fetchDetails: true,
+      shouldAbort,
     });
     console.log(`[Discovery] Google Maps returned ${gmResults.length} results`);
 
     if (gmResults.length < GM_MIN_ACCEPTABLE) {
+      if (await aborted()) return earlyReturn();
       console.log(`[Discovery] Google Maps feed too thin (${gmResults.length} < ${GM_MIN_ACCEPTABLE}), rotating session and retrying...`);
       await resetBrowserSession();
       try {
         const retried = await discoverFromGoogleMaps(keyword, city || '', country, limit, {
           headless: true,
           fetchDetails: true,
+          shouldAbort,
         });
         console.log(`[Discovery] Google Maps retry returned ${retried.length} results`);
         if (retried.length > gmResults.length) gmResults = retried;
@@ -113,11 +169,13 @@ export async function discoverBusinesses(
     // The first call usually only throws on a hard block. One retry with a
     // fresh session can clear a transient consent/flag wall.
     try {
+      if (await aborted()) return earlyReturn();
       console.log('[Discovery] Google Maps failed, rotating session and retrying once...');
       await resetBrowserSession();
       const retried = await discoverFromGoogleMaps(keyword, city || '', country, limit, {
         headless: true,
         fetchDetails: true,
+        shouldAbort,
       });
       console.log(`[Discovery] Google Maps retry returned ${retried.length} results`);
       allBusinesses.push(...retried);
@@ -126,29 +184,35 @@ export async function discoverBusinesses(
     }
   }
 
+  if (await aborted()) return earlyReturn();
+
   await sleep(1500);
 
   // Source 1: OpenStreetMap
   try {
     console.log('[Discovery] Querying OpenStreetMap...');
-    const osmResults = await discoverFromOSM(keyword, city || '', country, Math.ceil(limit * 0.6), round);
+    const osmResults = await discoverFromOSM(keyword, city || '', country, Math.ceil(limit * 0.6), round, shouldAbort);
     console.log(`[Discovery] OSM returned ${osmResults.length} results`);
     allBusinesses.push(...osmResults);
   } catch (error) {
     console.error('[Discovery] OSM source failed:', error);
   }
 
+  if (await aborted()) return earlyReturn();
+
   await sleep(1000);
 
   // Source 2: DuckDuckGo Web Search
   try {
     console.log('[Discovery] Querying DuckDuckGo...');
-    const webResults = await discoverFromWebSearch(keyword, city || '', country, Math.ceil(limit * 0.8), round);
+    const webResults = await discoverFromWebSearch(keyword, city || '', country, Math.ceil(limit * 0.8), round, shouldAbort);
     console.log(`[Discovery] Web search returned ${webResults.length} results`);
     allBusinesses.push(...webResults);
   } catch (error) {
     console.error('[Discovery] Web search source failed:', error);
   }
+
+  if (await aborted()) return earlyReturn();
 
   await sleep(1000);
 
@@ -156,7 +220,7 @@ export async function discoverBusinesses(
   // and a fallback when DuckDuckGo's index is thin for a given keyword)
   try {
     console.log('[Discovery] Querying Bing...');
-    const bingResults = await discoverFromBing(keyword, city || '', country, Math.ceil(limit * 0.8), round);
+    const bingResults = await discoverFromBing(keyword, city || '', country, Math.ceil(limit * 0.8), round, shouldAbort);
     console.log(`[Discovery] Bing returned ${bingResults.length} results`);
     allBusinesses.push(...bingResults);
   } catch (error) {
@@ -187,8 +251,17 @@ export async function discoverBusinesses(
   const deduplicated = Array.from(seen.values());
   console.log(`[Discovery] After deduplication: ${deduplicated.length} unique businesses`);
 
+  // Country gate: drop businesses that clearly belong to a different country
+  // (e.g. Bangladesh leads leaking into a Pakistan search). Fail-open when
+  // no country signal exists so legitimate leads are not wrongly dropped.
+  const countryFiltered = deduplicated.filter((b) => isCountryMatch(b, country));
+  const dropped = deduplicated.length - countryFiltered.length;
+  if (dropped > 0) {
+    console.log(`[Discovery] Country filter removed ${dropped} businesses not matching "${country}"`);
+  }
+
   return {
-    businesses: deduplicated.slice(0, limit),
-    totalCount: deduplicated.length,
+    businesses: countryFiltered.slice(0, limit),
+    totalCount: countryFiltered.length,
   };
 }

@@ -113,7 +113,8 @@ export async function discoverFromWebSearch(
   city: string,
   country: string,
   limit: number = 30,
-  round: number = 0
+  round: number = 0,
+  shouldAbort?: () => Promise<boolean>
 ): Promise<DiscoveryBusiness[]> {
   const businesses: DiscoveryBusiness[] = [];
   const query = buildQuery(keyword, city, country, round);
@@ -128,6 +129,7 @@ export async function discoverFromWebSearch(
   // and resilient to markup that only appears after JS executes.
   const result = await withPage(async (page) => {
     for (let pageNum = 0; pageNum < pagesToSearch; pageNum++) {
+      if (shouldAbort && (await shouldAbort())) return businesses;
       try {
         const params = new URLSearchParams({
           q: query,
