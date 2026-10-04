@@ -29,6 +29,10 @@ To expose the app beyond this PC, put a reverse proxy in front of ports
 - Cross-origin (CSRF) guard: only `ALLOWED_ORIGINS` may send state-changing requests.
 - Export + logs routes are admin-only; per-IP read throttles limit scraping.
 - Server binds to loopback; never exposed directly to the LAN.
+- This repository is public, so the database is never committed in plain text.
+  `seed/crm.db.enc` is AES-256-GCM encrypted under a scrypt-derived passphrase
+  that stays off the machine; `1-INSTALL.bat` asks for it and decrypts into
+  `server/data/crm.db`. See `seed/README.md`.
 
 ## Setup (local)
 
@@ -147,6 +151,7 @@ cloud storage for real disaster recovery.
 | `npm run dev` / `npm run build` / `npm start` | Next.js dev server / production build / production server |
 | `npm run backup` | snapshot the SQLite DB to `backups\` |
 | `npm run seed:db` | regenerate `seed\crm.db` from the live database |
+| `npm run seed:encrypt` | encrypt `seed\crm.db` into the committed `seed\crm.db.enc` |
 | `npm run rotate-logs` | rotate any `logs\*.log` file over 5MB |
 | `npm run import:local` / `npm run db:setup` | import a JSON export into SQLite |
 | `npm run create-admin` | create/update the first admin |

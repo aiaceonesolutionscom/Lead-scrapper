@@ -7,3 +7,9 @@
 
 # Everything else stays LF in the repository.
 * text=auto eol=lf
+
+# The encrypted seed database is ciphertext, not text. Marking it binary stops
+# Git from applying line-ending conversion or trying to diff it as text, either
+# of which would corrupt the file for anyone cloning the repository.
+*.enc binary
+*.db binary
