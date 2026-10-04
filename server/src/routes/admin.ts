@@ -47,7 +47,7 @@ adminRouter.get(
   })
 );
 
-// POST /api/admin/users â€” create user (email acts as the login identifier)
+// POST /api/admin/users — create user (email acts as the login identifier)
 adminRouter.post(
   '/users',
   asyncHandler(async (req: AppRequest, res: AppResponse) => {
@@ -85,7 +85,7 @@ adminRouter.post(
   })
 );
 
-// PUT /api/admin/users/:id â€” update username/role/enabled (never the password)
+// PUT /api/admin/users/:id — update username/role/enabled (never the password)
 adminRouter.put(
   '/users/:id',
   asyncHandler(async (req: AppRequest, res: AppResponse) => {
@@ -211,7 +211,7 @@ adminRouter.delete(
   })
 );
 
-// GET /api/admin/users/:id/searches â€” one user's extraction history (admin).
+// GET /api/admin/users/:id/searches — one user's extraction history (admin).
 adminRouter.get(
   '/users/:id/searches',
   asyncHandler(async (req: AppRequest, res: AppResponse) => {
@@ -225,7 +225,7 @@ adminRouter.get(
   })
 );
 
-// GET /api/admin/overview â€” per-user extraction stats + system/imported bucket
+// GET /api/admin/overview — per-user extraction stats + system/imported bucket
 adminRouter.get(
   '/overview',
   asyncHandler(async (_req: AppRequest, res: AppResponse) => {
@@ -277,7 +277,7 @@ adminRouter.get(
   })
 );
 
-// GET /api/admin/events?level=&tail= â€” app events (errors, logs)
+// GET /api/admin/events?level=&tail= — app events (errors, logs)
 adminRouter.get(
   '/events',
   asyncHandler(async (req: AppRequest, res: AppResponse) => {
@@ -299,7 +299,7 @@ adminRouter.get(
   })
 );
 
-// DELETE /api/admin/events â€” purge events older than retention (or all)
+// DELETE /api/admin/events — purge events older than retention (or all)
 adminRouter.delete(
   '/events',
   asyncHandler(async (req: AppRequest, res: AppResponse) => {
@@ -339,7 +339,7 @@ adminRouter.get(
         total_gb: Math.round((s.blocks * s.bsize) / 1024 / 1024 / 1024 * 10) / 10,
       };
     } catch {
-      // statfs unsupported on this platform â€” leave null
+      // statfs unsupported on this platform — leave null
     }
 
     res.json({
@@ -409,7 +409,7 @@ adminRouter.get(
   })
 );
 
-// POST /api/admin/backup â€” trigger a manual database backup (VACUUM INTO a
+// POST /api/admin/backup — trigger a manual database backup (VACUUM INTO a
 // consistent snapshot in the same location the daily script uses).
 adminRouter.post(
   '/backup',

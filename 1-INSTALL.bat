@@ -15,12 +15,12 @@ echo.
 echo Internet access is required for this step.
 echo.
 
-echo [1/5] Node.js 24 ...
+echo [1/6] Node.js 24 ...
 powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%scripts\install-node.ps1"
 if errorlevel 1 goto failed
 
 echo.
-echo [2/5] Google Chrome ...
+echo [2/6] Google Chrome ...
 powershell -NoProfile -Command "if ((Test-Path 'C:\Program Files\Google\Chrome\Application\chrome.exe') -or (Test-Path 'C:\Program Files (x86)\Google\Chrome\Application\chrome.exe')) { exit 0 } else { exit 1 }"
 if errorlevel 1 (
   where winget >nul 2>nul
@@ -37,7 +37,7 @@ echo   Note: if Chrome stays missing, extraction falls back to the bundled
 echo   Chromium browser and Google may occasionally block a run.
 
 echo.
-echo [3/5] npm packages ...
+echo [3/6] npm packages ...
 pushd "%ROOT%"
 if exist "%ROOT%package-lock.json" (
   echo   npm ci in root ...
@@ -61,20 +61,33 @@ if errorlevel 1 goto failed
 popd
 
 echo.
-echo [4/5] Playwright fallback browser ...
+echo [4/6] Playwright fallback browser ...
 pushd "%ROOT%"
 call npx playwright install chromium
 if errorlevel 1 goto failed
 popd
 
 echo.
-echo [5/5] Configuration, database and admin account ...
+echo [5/6] Configuration, database and admin account ...
 powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%scripts\install-config.ps1"
 if errorlevel 1 goto failed
 
+rem This must come AFTER install-config.ps1: NEXT_PUBLIC_* values are inlined
+rem into the bundle at build time, so .env.local has to exist first or the API
+rem URL gets baked in as empty.
+echo.
+echo [6/6] Building the production frontend (once) ...
+powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%scripts\ensure-build.ps1"
+if errorlevel 1 (
+  echo.
+  echo   The production build failed, but the install itself is complete.
+  echo   You can still use 2-START-DEV.bat while you fix it. See logs\build.log.
+  goto failed
+)
+
 echo.
 echo ============================================================
-echo   Install finished.
+echo   Install finished. Build the app with 2-START.bat.
 echo   Run 2-START.bat to launch the app.
 echo ============================================================
 echo.

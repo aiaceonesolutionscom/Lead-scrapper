@@ -26,7 +26,7 @@ if "!HEALTH_CODE!"=="200" (
   set "READY=1"
 ) else (
   if !TRIES! LSS 60 (
-    timeout /t 1 >nul
+    ping -n 2 127.0.0.1 >nul
     goto wait_loop
   )
 )

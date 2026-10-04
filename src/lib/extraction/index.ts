@@ -29,10 +29,10 @@ const ENRICHMENT_CONCURRENCY = 6;
  * discovery country_code (Maps/OSM), free-text country, and the validated
  * phone_country. A contradiction from ANY source (e.g. a listing tagged
  * country_code=PK but a validated phone_country=SA) means this business is
- * not reliably in the target country â€” fail-closed on contradictions, and
+ * not reliably in the target country — fail-closed on contradictions, and
  * fail-open only when NO signal resolves at all.
  *
- * NOTE: the email domain is deliberately NOT used here â€” a `.com`/`.gr`
+ * NOTE: the email domain is deliberately NOT used here — a `.com`/`.gr`
  * domain is a weak country signal and would false-positive on legitimately
  * local businesses using foreign-hosted sites.
  */
@@ -55,7 +55,7 @@ function isEnrichedCountryMatch(biz: EnrichedBusiness, targetCountry: string): b
 }
 
 // In-process semaphore: up to N extractions may run at once (N must match
-// MAX_CONCURRENT_SEARCHES â€” the API-level DB guard). Each extraction gets its
+// MAX_CONCURRENT_SEARCHES — the API-level DB guard). Each extraction gets its
 // OWN Chrome session/profile via extractionSessionStore (see browser.ts), so
 // parallel runs never share cookies. BUT a serial setup (1) is what keeps the
 // warm profile in play: only a solo search reuses the warm profile directly,
@@ -137,7 +137,7 @@ async function runExtractionInner(params: ExtractionParams, store: ExtractionSto
   const seenKeys = new Set<string>();
   let persistedCount = 0;
   // Counts only leads that did not already exist in the database when this run
-  // started. This â€” not the total linked into the search â€” is what the requested
+  // started. This — not the total linked into the search — is what the requested
   // count is measured against, otherwise a repeat search re-counts saved
   // businesses and finishes instantly without collecting anything new.
   let newLeadCount = 0;
@@ -167,7 +167,7 @@ async function runExtractionInner(params: ExtractionParams, store: ExtractionSto
       const remaining = requestedCount - newLeadCount;
       if (remaining <= 0) break;
 
-      // Phase 1: Discovery â€” over-fetch aggressively so enrichment/dedup
+      // Phase 1: Discovery — over-fetch aggressively so enrichment/dedup
       // drop-off still leaves enough to reach the target.
       await store.updateSearch(searchId, { status: 'discovering' });
       logExtraction(searchId, `Round ${locIdx + 1}: Starting discovery in ${place} (need ${remaining} more leads, fetching ${Math.max(remaining * 2, 20)})`);
@@ -208,7 +208,7 @@ async function runExtractionInner(params: ExtractionParams, store: ExtractionSto
         break;
       }
 
-      // A location that yields nothing new is a dead end â€” but don't kill the
+      // A location that yields nothing new is a dead end — but don't kill the
       // whole search yet; the next location in the schedule may be rich.
       // Two consecutive empty locations is a strong overall diminishing-returns
       // signal, so stop sweeping instead of scraping the last cities uselessly.
@@ -236,7 +236,7 @@ async function runExtractionInner(params: ExtractionParams, store: ExtractionSto
           }
         );
         const enrichedOk = enrichedRaw.filter((e): e is NonNullable<typeof e> => e !== null);
-        logExtraction(searchId, `Round ${locIdx + 1}: Enrichment done â€” ${enrichedOk.length}/${freshBusinesses.length} successful`);
+        logExtraction(searchId, `Round ${locIdx + 1}: Enrichment done — ${enrichedOk.length}/${freshBusinesses.length} successful`);
 
         if (await isCancelled()) {
           stopReason = 'Cancelled by user';
@@ -249,13 +249,13 @@ async function runExtractionInner(params: ExtractionParams, store: ExtractionSto
           `[Extraction] Round ${locIdx}: after dedup ${deduplicated.length} unique businesses (from ${enrichedOk.length} enriched)`
         );
 
-        // Phase 4: Persist â€” only verified (real phone or verified email)
+        // Phase 4: Persist — only verified (real phone or verified email)
         // leads count toward the requested quota. Unverified leads with a
         // real phone or email are still saved (useful, contactable data) but
         // don't fill the quota. Website-only UNVERIFIED leads are dropped:
         // without a phone/email there is no usable contact and a generic
         // corporate page (google.com, netflix.com, an account/login page)
-        // proves nothing about the business â€” those are exactly the junk
+        // proves nothing about the business — those are exactly the junk
         // cards that polluted past searches. Ill-formed names are garbage
         // regardless of contact data.
         const verified = (biz: EnrichedBusiness) => biz.verified === true;
@@ -273,7 +273,7 @@ async function runExtractionInner(params: ExtractionParams, store: ExtractionSto
             // revealed as belonging to a different country (e.g. a phone
             // with +880 country code in a Pakistan search).
             if (!isEnrichedCountryMatch(biz, country)) {
-              logExtraction(searchId, `Skipped (wrong country): "${biz.name}" â€” country_code=${biz.country_code || biz.phone_country || 'unknown'}`);
+              logExtraction(searchId, `Skipped (wrong country): "${biz.name}" — country_code=${biz.country_code || biz.phone_country || 'unknown'}`);
               continue;
             }
 
@@ -294,11 +294,11 @@ async function runExtractionInner(params: ExtractionParams, store: ExtractionSto
             if (skipReason) {
               logExtraction(
                 searchId,
-                `Skipped (${skipReason}): "${biz.name}" â€” phone=${biz.phone ?? 'none'}, email=${biz.email ?? 'none'}, website=${biz.website ?? 'none'}, verified=${biz.verified === true}`
+                `Skipped (${skipReason}): "${biz.name}" — phone=${biz.phone ?? 'none'}, email=${biz.email ?? 'none'}, website=${biz.website ?? 'none'}, verified=${biz.verified === true}`
               );
               continue;
             }
-            // Irrelevant engine-sourced leads are never persisted â€” they are
+            // Irrelevant engine-sourced leads are never persisted — they are
             // junk that slipped through enrichment (the safety net).
             if (biz.relevant === false) {
               logExtraction(searchId, `Skipped (not relevant to "${keyword}"): "${biz.name}"`);

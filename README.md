@@ -5,15 +5,22 @@ Extract verified business leads from worldwide sources, enrich them, and manage 
 ## Architecture
 
 ```
-Vercel (Next.js frontend)  →  Cloudflare Tunnel  →  local Windows laptop backend
-                                                      (Express + SQLite + Playwright)
+Browser  →  Next.js frontend  →  local Express backend
+localhost:3000                    127.0.0.1:5000
+                                  (SQLite + Playwright)
 ```
 
-- **Frontend** (Vercel): Next.js App Router. Talks to the backend over the tunnel.
-- **Backend** (local laptop, `server/`): Express + SQLite (`node:sqlite`), hosts the
-  headless Chromium extraction engine via `PLAYWRIGHT_BROWSERS_PATH` on D:.
-  Binds to `127.0.0.1` only — the tunnel is the single entry point. Auth + brute-force
-  protection + CSRF/origin guard + anti-scrape rate limits are all enforced server-side.
+- **Frontend** (`src/`): Next.js App Router. Serves the UI and proxies `/api/*`
+  to the backend through `src/app/api/[...path]/route.ts`.
+- **Backend** (`server/`): Express + SQLite (`node:sqlite`), hosts the headless
+  Chrome/Chromium extraction engine via `PLAYWRIGHT_BROWSERS_PATH`. Binds to
+  `127.0.0.1` only, so nothing is reachable from the network. Auth +
+  brute-force protection + CSRF/origin guard + anti-scrape rate limits are all
+  enforced server-side.
+
+Everything runs on one machine. There is no tunnel and no cloud deployment.
+To expose the app beyond this PC, put a reverse proxy in front of ports
+3000/5000 and add its origin to `ALLOWED_ORIGINS`.
 
 ## Security model
 
@@ -28,75 +35,92 @@ Vercel (Next.js frontend)  →  Cloudflare Tunnel  →  local Windows laptop bac
 Data migrated from the old Supabase backend into the local SQLite DB
 (`server/data/crm.db`) — SQLite is now the single source of truth. No Supabase.
 
-Everything runs from **D:** only (DB, logs, Chromium, npm cache, temp files):
-`scripts\run-backend.cmd` sets `TMP`/`TEMP`/`NPM_CONFIG_CACHE` under
-`.runtime\` so nothing touches C:. Use the same pattern for the frontend.
+The project works from any drive. `scripts\run-backend.cmd` and
+`scripts\run-frontend.cmd` set `TMP`/`TEMP`/`NPM_CONFIG_CACHE` under
+`.runtime\`, so temp files stay inside the project folder instead of C:.
 
-Create the first admin (only if `ADMIN_USERNAME`/`ADMIN_PASSWORD` are not set):
-
-```bash
-npm run create-admin        # prompts for username/password, OR:
-ADMIN_USERNAME=admin ADMIN_PASSWORD='YourPass123!' npm run create-admin
-```
-
-## Backend (local laptop)
+Run `1-INSTALL.bat` to do all of this automatically. To do it by hand:
 
 ```bash
-scripts\run-backend.cmd     # D:-runtime wrapper for `npm run backend` (Express on http://127.0.0.1:5000)
+npm ci && npm --prefix server ci     # dependencies
+npx playwright install chromium      # fallback browser
+npm run create-admin                 # first admin account
+npm run build                        # production frontend build
 ```
 
-### Tunnel (Cloudflare)
+`scripts\create-admin.ts` **creates or updates** an account, so running it
+against an existing database just resets that user's password — handy when the
+seed database already contains accounts.
 
-`cloudflared.exe` is a **portable binary under `tools\`** (downloaded straight
-from Cloudflare's GitHub releases) — nothing is installed system-wide or on C:.
-`scripts\run-tunnel.cmd` and `npm run tunnel` both call it by that path.
-
-By default it runs a **quick/ephemeral tunnel** (`cloudflared tunnel --url`),
-which gets a new random `https://*.trycloudflare.com` URL every restart —
-fine for development, but you'd have to update `NEXT_PUBLIC_API_BASE_URL` on
-Vercel every time it restarts.
-
-To switch to a **fixed named tunnel** (stable URL forever) once you have a
-domain added to your Cloudflare account:
+## Backend
 
 ```bash
-set "TUNNEL_ORIGIN_CERT=D:\Office work\yawar leads\lead-extractor-crm\.runtime\cloudflared\cert.pem"
-tools\cloudflared.exe tunnel login
-tools\cloudflared.exe tunnel create leadcrm
-# add a DNS CNAME for e.g. api.yourdomain.com -> the tunnel
+scripts\run-backend.cmd     # wraps `npm --prefix server run start` (Express on http://127.0.0.1:5000)
 ```
 
-Then fill in `.runtime\cloudflared\config.yml` (see the commented block at
-the bottom of `scripts\run-tunnel.cmd` for the exact format), point
-`NEXT_PUBLIC_API_BASE_URL` at the new fixed hostname, and switch
-`run-tunnel.cmd` from the quick-tunnel line to the named-tunnel line.
+## Frontend
 
-## Frontend (Vercel)
-
-Set these environment variables in Vercel:
+Runs locally as a production build (`next build` + `next start`); see
+**Fast mode vs dev mode** below. Configuration lives in `.env.local`, which
+`1-INSTALL.bat` generates from `.env.example`:
 
 | Var | Value |
 |-----|-------|
-| `NEXT_PUBLIC_API_BASE_URL` | `https://leadcrm.yourdomain.com` (your fixed tunnel URL) |
-| `NEXT_PUBLIC_APP_URL` | your Vercel app URL |
+| `NEXT_PUBLIC_API_BASE_URL` | `http://127.0.0.1:5000` — the browser calls the backend directly. Leave it empty to route `/api/*` through the Next.js proxy instead. |
+| `NEXT_PUBLIC_TURNSTILE_SITE_KEY` | empty disables the captcha; login is still protected by the server-side lockouts |
+| `ALLOWED_ORIGINS` | frontends allowed to call the API with cookies |
 
-Add your Vercel URL to the backend's `ALLOWED_ORIGINS` in the laptop's `.env.local`.
+If you change any `NEXT_PUBLIC_*` value, rebuild before restarting — those
+values are inlined into the bundle at build time. `2-START.bat` does this for
+you automatically.
 
 ## Running locally (full stack)
 
-One command starts everything, in order, each in its own window:
+Three double-clickable files sit in the project root. On a fresh PC:
+
+1. `1-INSTALL.bat` — one time. Installs Node 24 into `.runtime\node` (no admin
+   rights needed), installs Chrome if missing, runs `npm ci`, installs the
+   Playwright browser, writes `.env.local`, seeds `server\data\crm.db` from
+   `seed\crm.db`, creates the admin account, and **builds the production
+   frontend**.
+2. `2-START.bat` — every time you want to use it. Starts the backend and the
+   frontend and opens the browser.
+3. `3-STOP.bat` — stops both.
+
+## Fast mode vs dev mode
+
+`2-START.bat` runs the frontend as a **production build** (`next build` +
+`next start`). `next dev` recompiles every route the moment you visit it
+(3-11s each), which is what makes local use feel slow; a production build is
+compiled once, so pages load as fast as a deployed build.
+
+You do not have to rebuild by hand. `scripts\ensure-build.ps1` compares the
+newest file under `src\` (plus `next.config.ts`, `package-lock.json` and
+`.env.local`) against `.next\BUILD_ID`, and rebuilds only when something
+actually changed — about 30-75 seconds when it does, nothing when it doesn't.
+`.env.local` is part of that check because `NEXT_PUBLIC_*` values are inlined
+into the bundle at build time.
+
+When you are editing code and want changes to appear instantly, use
+`2-START-DEV.bat` instead. It is the same script with `APP_MODE=dev`, which
+runs `next dev`. The trade-off is the slow on-demand compiling — close it and
+go back to `2-START.bat` once you want the fast version again.
+
+Build output, including any failure, is appended to `logs\build.log`. If the
+build fails, `2-START.bat` falls back to dev mode automatically so the app
+still starts.
+
+The backend needs no build step: it runs straight from TypeScript via `tsx`,
+and its time is spent waiting on Playwright and the network, not compiling.
+
+To run the pieces by hand:
 
 ```bash
-npm run start:local     # backend -> wait for health -> frontend -> tunnel
-npm run stop:local      # stop all three
+scripts\run-backend.cmd            # backend on 127.0.0.1:5000
+scripts\run-frontend.cmd           # frontend, fast mode
+set APP_MODE=dev && scripts\run-frontend.cmd   # frontend, dev mode
+scripts\stop-all.cmd               # stop both by port
 ```
-
-Or individually:
-
-1. `scripts\run-backend.cmd` (terminal 1)
-2. `scripts\run-tunnel.cmd` (terminal 2) → copy the `https://*.trycloudflare.com` URL
-3. Set `NEXT_PUBLIC_API_BASE_URL` to that URL and `scripts\run-frontend.cmd` (terminal 3)
-4. Open http://localhost:3000 and log in
 
 ## Backups
 
@@ -107,22 +131,22 @@ npm run backup           # snapshot server/data/crm.db -> backups/backup-YYYY-MM
 Uses SQLite's `VACUUM INTO`, so it's safe to run while the backend is live.
 Schedule it (e.g. daily via Windows Task Scheduler) for regular backups.
 
-**Disaster recovery note:** backups are written to `backups\` on the same D:
-drive as everything else. That protects against accidental deletion, but
-**not** against the laptop or drive itself failing. Periodically copy the
-`backups\` folder to a separate physical location or cloud storage for real
-disaster recovery.
+**Disaster recovery note:** backups are written to `backups\` inside the project
+folder. That protects against accidental deletion, but **not** against the
+drive failing. Copy the `backups\` folder to a separate physical location or
+cloud storage for real disaster recovery.
 
 ## npm scripts
 
 | Script | Purpose |
 |--------|---------|
-| `npm run start:local` | start backend + frontend + tunnel, in order |
-| `npm run stop:local` | stop all three |
+| `npm run start:local` | start backend + frontend, in order |
+| `npm run stop:local` | stop both, by port |
 | `npm run backend` | start the Express backend |
 | `npm run backend:dev` | start backend with auto-reload |
-| `npm run tunnel` | Cloudflare tunnel (portable `tools\cloudflared.exe`) |
+| `npm run dev` / `npm run build` / `npm start` | Next.js dev server / production build / production server |
 | `npm run backup` | snapshot the SQLite DB to `backups\` |
+| `npm run seed:db` | regenerate `seed\crm.db` from the live database |
 | `npm run rotate-logs` | rotate any `logs\*.log` file over 5MB |
 | `npm run import:local` / `npm run db:setup` | import a JSON export into SQLite |
 | `npm run create-admin` | create/update the first admin |
